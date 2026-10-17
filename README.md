@@ -20,6 +20,10 @@ Architecture, request flow diagrams and the contention analysis are in
 [docs/architecture.md](docs/architecture.md). Design decisions are in
 [docs/adr](docs/adr). The API contract is
 [apispec/ratelimiter.openapi.yaml](apispec/ratelimiter.openapi.yaml).
+Rules for AI coding agents (and a good checklist for humans) are in
+[AGENTS.md](AGENTS.md): invariants that must not be broken, where code goes,
+and what must pass before a change is done. `CLAUDE.md` imports it for Claude
+Code.
 
 ## Live deployment
 
