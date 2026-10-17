@@ -107,7 +107,7 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 
 	update := map[string]any{"tenant": "acme", "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 7}
 	resp := a.Do(http.MethodPut, "/v1/rules/"+id, update, map[string]string{
-		"Authorization": "Bearer " + testutils.AdminToken, "If-Match": `"1"`,
+		"Authorization": "Bearer " + testutils.CallerToken, "If-Match": `"1"`,
 	})
 	require.Equal(t, http.StatusOK, resp.Status, "body: %s", resp.Body)
 
@@ -115,7 +115,7 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 		return b.Check("acme", "orders", 0)["limit"] == float64(7)
 	}, 2*time.Second, 10*time.Millisecond, "instance b enforces the new limit")
 
-	assert.Equal(t, http.StatusNoContent, b.Admin(http.MethodDelete, "/v1/rules/"+id, nil).Status)
+	assert.Equal(t, http.StatusNoContent, b.Caller(http.MethodDelete, "/v1/rules/"+id, nil).Status)
 	require.Eventually(t, func() bool {
 		return a.Check("acme", "orders", 0)["reason"] == "no_rule"
 	}, 2*time.Second, 10*time.Millisecond, "instance a drops the deleted rule")

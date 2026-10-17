@@ -19,12 +19,13 @@ const maxJWTLength = 8 << 10
 //
 // TODO(auth): this is a format check only, NOT authentication. The signature,
 // issuer, audience and expiry are not verified, so any well-formed token is
-// accepted. Before production:
+// accepted on every /v1 route, including rule management. Before production:
 //   - authn: verify the signature against the identity provider's JWKS
 //     (RS256/ES256 only), and check iss, aud, exp and nbf;
-//   - authz: require scopes per route (e.g. ratelimit:check, ratelimit:admin)
-//     and a tenants claim so a caller can only consume its own tenants' quota;
-//   - replace the shared ADMIN_TOKEN on admin routes with the same scheme.
+//   - authz: require scopes per route (e.g. ratelimit:check for decisions,
+//     ratelimit:admin for rules, feedback and the dashboard) and a tenants
+//     claim so a caller can only consume its own tenants' quota;
+//   - audit-log rule changes with the caller identity (sub).
 func RequireJWT() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")

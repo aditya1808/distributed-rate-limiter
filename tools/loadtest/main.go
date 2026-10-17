@@ -3,7 +3,7 @@
 // configured burst. It prints the per-instance split (X-Instance-ID) and
 // latency percentiles, and exits non-zero on any correctness failure.
 //
-//	go run ./tools/loadtest -urls http://localhost:8080 -token "$ADMIN_TOKEN" -fresh-conns
+//	go run ./tools/loadtest -urls http://localhost:8080 -fresh-conns
 package main
 
 import (
@@ -36,19 +36,15 @@ type result struct {
 func main() {
 	var (
 		urlsFlag   = flag.String("urls", "http://localhost:8080", "comma-separated base URLs")
-		token      = flag.String("token", os.Getenv("ADMIN_TOKEN"), "admin token (defaults to $ADMIN_TOKEN)")
 		algorithm  = flag.String("algorithm", "token_bucket", "token_bucket or sliding_window")
 		burst      = flag.Int("burst", 100, "requests that may be admitted")
 		requests   = flag.Int("n", 5000, "total requests")
 		concurrent = flag.Int("c", 200, "concurrent workers")
 		freshConns = flag.Bool("fresh-conns", false, "new connection per request so a load balancer spreads traffic")
 		minInst    = flag.Int("min-instances", 1, "fail if fewer distinct instances served traffic")
-		jwt        = flag.String("jwt", defaultJWT, "JWT sent to /v1/check")
+		jwt        = flag.String("jwt", defaultJWT, "JWT sent to every /v1 route")
 	)
 	flag.Parse()
-	if *token == "" {
-		fail("admin token required: -token or $ADMIN_TOKEN")
-	}
 	urls := strings.Split(*urlsFlag, ",")
 	client := &http.Client{
 		Timeout:   15 * time.Second,
@@ -66,7 +62,7 @@ func main() {
 	} else {
 		rule["limit"] = *burst
 	}
-	ruleID := createRule(client, urls[0], *token, rule)
+	ruleID := createRule(client, urls[0], *jwt, rule)
 	time.Sleep(500 * time.Millisecond) // let every instance's cache receive the change event
 
 	fmt.Printf("tenant=%s namespace=loadtest rule: %s burst=%d refill=1/h\n", tenant, *algorithm, *burst)
@@ -166,7 +162,7 @@ func main() {
 		ok = false
 	}
 	// Explicit, not deferred: os.Exit skips deferred calls.
-	deleteRule(client, urls[0], *token, ruleID)
+	deleteRule(client, urls[0], *jwt, ruleID)
 	if !ok {
 		os.Exit(1)
 	}

@@ -101,8 +101,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Rule:      rule.NewController(ruleManager),
 		Feedback:  feedback.NewController(adaptiveManager),
 		Health:    health.NewController(func(ctx context.Context) error { return rdb.Ping(ctx).Err() }, ruleCache.Loaded, shuttingDown, cfg.InstanceID),
-		Dashboard: dashboard.NewController(activity, evaluator),
-	}, cfg.AdminToken)
+		Dashboard: dashboard.NewController(activity, evaluator, cfg.InstanceID),
+	})
 
 	internal := gin.New()
 	internal.Use(middlewares.Recovery(log))

@@ -22,7 +22,6 @@ type Config struct {
 	KeyPrefix         string
 
 	RuleRefreshInterval time.Duration
-	AdminToken          string
 	DefaultAllow        bool
 
 	InstanceID       string
@@ -32,8 +31,6 @@ type Config struct {
 	ShutdownDrainDelay time.Duration
 	ShutdownTimeout    time.Duration
 }
-
-const minAdminTokenLen = 16
 
 func Load() (Config, error) {
 	host, _ := os.Hostname()
@@ -47,7 +44,6 @@ func Load() (Config, error) {
 		RedisMinIdleConns:   num("REDIS_MIN_IDLE_CONNS", -1, &errs),
 		KeyPrefix:           str("KEY_PREFIX", "rl"),
 		RuleRefreshInterval: dur("RULE_REFRESH_INTERVAL", 5*time.Second, &errs),
-		AdminToken:          os.Getenv("ADMIN_TOKEN"),
 		InstanceID:          str("INSTANCE_ID", host),
 		ExposeInstanceID:    boolean("EXPOSE_INSTANCE_ID", true, &errs),
 		LogLevel:            str("LOG_LEVEL", "info"),
@@ -61,9 +57,6 @@ func Load() (Config, error) {
 		cfg.DefaultAllow = false
 	default:
 		errs = append(errs, fmt.Errorf("DEFAULT_POLICY must be allow or deny, got %q", policy))
-	}
-	if len(cfg.AdminToken) < minAdminTokenLen {
-		errs = append(errs, fmt.Errorf("ADMIN_TOKEN must be set and at least %d characters", minAdminTokenLen))
 	}
 	if cfg.RedisMinIdleConns == -1 {
 		cfg.RedisMinIdleConns = cfg.RedisPoolSize

@@ -105,7 +105,8 @@ make stress    # when touching limiter/, cache/, persistence/ or concurrency
 
 - Never commit secrets, tokens, `.env` files or real connection strings.
   Secrets live in GitHub Actions secrets and App Platform `SECRET` envs.
-- `ADMIN_TOKEN` comparisons stay constant-time.
+- `/dashboard` is public by design: keep it read-only and server-rendered,
+  with no browser calls to `/v1` endpoints.
 - `/metrics` stays on the internal port only. Do not expose the OpenAPI spec,
   pprof or debug endpoints on the public port.
 - `middlewares/jwt.go` only checks JWT **format** (tracked TODO). Do not
@@ -114,8 +115,7 @@ make stress    # when touching limiter/, cache/, persistence/ or concurrency
 
 ## Deployment and CI
 
-- `.do/app.yaml` contains `${IMAGE_TAG}` and `${ADMIN_TOKEN}` (filled by
-  `envsubst` in CI) and `${rl-valkey.DATABASE_URL}` (an App Platform binding).
+- `.do/app.yaml` contains `${IMAGE_TAG}` (filled by `envsubst` in CI) and `${rl-valkey.DATABASE_URL}` (an App Platform binding).
   Do not hardcode values or rename these placeholders.
 - Pushes to `main` deploy to production after tests pass. Do not add steps
   that skip tests, use `continue-on-error`, or deploy from other branches.

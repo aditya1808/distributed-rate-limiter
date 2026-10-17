@@ -17,9 +17,7 @@ import (
 	"github.com/aditya1808/distributed-rate-limiter/core"
 )
 
-const AdminToken = "test-admin-token-0123456789"
-
-// CallerToken is a well-formed JWT for the decision endpoints:
+// CallerToken is a well-formed JWT for every protected route:
 // {"alg":"RS256","typ":"JWT"}.{"sub":"test-caller"}.<signature>
 const CallerToken = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LWNhbGxlciJ9.c2lnbmF0dXJl"
 
@@ -61,7 +59,6 @@ func NewTestApp(tb testing.TB, opts ...Option) *TestApp {
 		RedisTimeout:        500 * time.Millisecond,
 		RedisPoolSize:       100,
 		RuleRefreshInterval: time.Second,
-		AdminToken:          AdminToken,
 		DefaultAllow:        true,
 		InstanceID:          "test",
 		ExposeInstanceID:    true,
@@ -152,16 +149,7 @@ func (a *TestApp) Do(method, path string, body any, headers map[string]string) R
 	return Response{Status: resp.StatusCode, Header: resp.Header, Body: data}
 }
 
-func AdminHeaders() map[string]string {
-	return map[string]string{"Authorization": "Bearer " + AdminToken}
-}
-
-func (a *TestApp) Admin(method, path string, body any) Response {
-	a.tb.Helper()
-	return a.Do(method, path, body, AdminHeaders())
-}
-
-// CallerHeaders authenticates a request to the decision endpoints, merged
+// CallerHeaders authenticates a request to a protected route, merged
 // with any extra headers.
 func CallerHeaders(extra ...map[string]string) map[string]string {
 	h := map[string]string{"Authorization": "Bearer " + CallerToken}
@@ -173,7 +161,7 @@ func CallerHeaders(extra ...map[string]string) map[string]string {
 	return h
 }
 
-// Caller sends a request authenticated for the decision endpoints.
+// Caller sends an authenticated request.
 func (a *TestApp) Caller(method, path string, body any) Response {
 	a.tb.Helper()
 	return a.Do(method, path, body, CallerHeaders())
@@ -182,7 +170,7 @@ func (a *TestApp) Caller(method, path string, body any) Response {
 // CreateRule creates a rule and fails the test unless it returns 201.
 func (a *TestApp) CreateRule(rule map[string]any) map[string]any {
 	a.tb.Helper()
-	resp := a.Admin(http.MethodPost, "/v1/rules", rule)
+	resp := a.Caller(http.MethodPost, "/v1/rules", rule)
 	if resp.Status != http.StatusCreated {
 		a.tb.Fatalf("create rule: status %d body %s", resp.Status, resp.Body)
 	}

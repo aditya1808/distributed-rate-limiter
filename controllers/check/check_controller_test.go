@@ -134,9 +134,6 @@ func TestCheck_RequiresJWT(t *testing.T) {
 	resp = app.Do(http.MethodPost, "/v1/check", body, map[string]string{"Authorization": "Bearer not-a-jwt"})
 	assert.Equal(t, http.StatusUnauthorized, resp.Status)
 	assert.Equal(t, "urn:ratelimiter:problem:invalid-token", resp.Map(t)["type"])
-
-	resp = app.Do(http.MethodPost, "/v1/check", body, testutils.AdminHeaders())
-	assert.Equal(t, http.StatusUnauthorized, resp.Status, "the admin token is not a JWT")
 }
 
 func TestUnknownRouteAndMethod(t *testing.T) {

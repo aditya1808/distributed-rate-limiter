@@ -67,7 +67,7 @@ paths:
       tags: [Rules]
       operationId: createRule
       summary: Create a rule
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       requestBody:
         required: true
         content:
@@ -90,7 +90,7 @@ paths:
       tags: [Rules]
       operationId: listRules
       summary: List rules
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       parameters:
         - name: tenant
           in: query
@@ -117,7 +117,7 @@ paths:
       tags: [Rules]
       operationId: getRule
       summary: Get a rule
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       responses:
         '200':
           description: Rule
@@ -133,7 +133,7 @@ paths:
       tags: [Rules]
       operationId: updateRule
       summary: Replace a rule (optimistic concurrency via If-Match)
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       parameters:
         - name: If-Match
           in: header
@@ -163,7 +163,7 @@ paths:
       tags: [Rules]
       operationId: deleteRule
       summary: Delete a rule
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       responses:
         '204': { description: Deleted }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -175,7 +175,7 @@ paths:
       tags: [Adaptive]
       operationId: submitFeedback
       summary: Report a downstream error rate to temporarily tighten limits
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       requestBody:
         required: true
         content:
@@ -195,7 +195,7 @@ paths:
       tags: [Dashboard]
       operationId: listActiveTenants
       summary: Recently active tenants with current quota
-      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      security: [{ jwtAuth: [] }]
       parameters:
         - name: limit
           in: query
@@ -213,15 +213,19 @@ paths:
     get:
       tags: [Dashboard]
       operationId: dashboard
-      summary: Quota utilization dashboard (HTML)
-      security: [{ basicAuth: [] }, { bearerAuth: [] }]
+      summary: Quota utilization dashboard (public, server-rendered HTML)
+      description: Read-only page that refreshes itself; needs no credentials and runs no JavaScript.
       responses:
         '200':
           description: HTML page
           content:
             text/html:
               schema: { type: string }
-        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: HTML page with an unavailable banner (state store unreachable)
+          content:
+            text/html:
+              schema: { type: string }
 
   /healthz:
     get:
@@ -261,13 +265,6 @@ components:
       description: |
         A well-formed JWT. Currently only the format is checked; signature, issuer,
         audience and expiry verification are planned (see TODO in middlewares/jwt.go).
-    bearerAuth:
-      type: http
-      scheme: bearer
-    basicAuth:
-      type: http
-      scheme: basic
-      description: Any username; the admin token is the password.
 
   parameters:
     Tenant:
@@ -293,7 +290,7 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     Unauthorized:
-      description: Missing or invalid admin token
+      description: Missing or malformed JWT
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

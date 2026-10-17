@@ -1,6 +1,5 @@
-REDIS_URL   ?= redis://localhost:6379/0
-ADMIN_TOKEN ?= local-dev-admin-token-change-me
-BASE_URLS   ?= http://localhost:8080
+REDIS_URL ?= redis://localhost:6379/0
+BASE_URLS ?= http://localhost:8080
 
 export REDIS_URL
 
@@ -27,10 +26,10 @@ fmt: ## Format code
 	golangci-lint fmt ./...
 
 run: ## Run one instance locally against $(REDIS_URL)
-	ADMIN_TOKEN=$(ADMIN_TOKEN) go run .
+	go run .
 
 up: ## Two instances + Redis behind nginx on :8080
-	ADMIN_TOKEN=$(ADMIN_TOKEN) docker compose up --build -d
+	docker compose up --build -d
 
 down: ## Stop the compose stack (keeps the Redis volume)
 	docker compose down
@@ -39,8 +38,8 @@ logs: ## Tail instance logs
 	docker compose logs -f app1 app2
 
 e2e: ## End-to-end tests against $(BASE_URLS)
-	E2E_BASE_URLS=$(BASE_URLS) E2E_ADMIN_TOKEN=$(ADMIN_TOKEN) E2E_FRESH_CONNS=true E2E_MIN_INSTANCES=2 \
+	E2E_BASE_URLS=$(BASE_URLS) E2E_FRESH_CONNS=true E2E_MIN_INSTANCES=2 \
 		go test -tags e2e -count=1 -v ./test/e2e/
 
 load: ## Cross-instance load test against $(BASE_URLS)
-	go run ./tools/loadtest -urls $(BASE_URLS) -token $(ADMIN_TOKEN) -n 5000 -c 200 -burst 100 -fresh-conns -min-instances 2
+	go run ./tools/loadtest -urls $(BASE_URLS) -n 5000 -c 200 -burst 100 -fresh-conns -min-instances 2

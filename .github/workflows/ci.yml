@@ -117,22 +117,18 @@ jobs:
       - name: Roll out ${{ github.sha }}
         env:
           IMAGE_TAG: ${{ github.sha }}
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
           spec="$RUNNER_TEMP/app.yaml"
-          envsubst '$IMAGE_TAG $ADMIN_TOKEN' < .do/app.yaml > "$spec"
+          envsubst '$IMAGE_TAG' < .do/app.yaml > "$spec"
           doctl apps update "${{ vars.DO_APP_ID }}" --spec "$spec" --wait --format ID,DefaultIngress
           rm -f "$spec"
 
       - name: End-to-end tests against production
         env:
           E2E_BASE_URLS: ${{ vars.DO_APP_URL }}
-          E2E_ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           E2E_FRESH_CONNS: "true"
           E2E_MIN_INSTANCES: "2"
         run: go test -tags e2e -count=1 -v ./test/e2e/
 
       - name: Cross-instance load test
-        env:
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: go run ./tools/loadtest -urls "${{ vars.DO_APP_URL }}" -n 2000 -c 100 -burst 100 -fresh-conns -min-instances 2

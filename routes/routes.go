@@ -23,29 +23,23 @@ type Controllers struct {
 	Dashboard *dashboard.Controller
 }
 
-// AddRoutes registers the public API. Decisions require a JWT; everything that
-// changes behaviour or reveals other tenants sits behind admin auth.
-func AddRoutes(r *gin.Engine, ctl Controllers, adminToken string) {
-	admin := middlewares.AdminAuth(adminToken)
-
+// AddRoutes registers the public API. The dashboard is a deliberately open,
+// read-only, server-rendered page; every /v1 route requires a JWT.
+func AddRoutes(r *gin.Engine, ctl Controllers) {
 	r.GET("/healthz", ctl.Health.Liveness)
 	r.GET("/readyz", ctl.Health.Readiness)
-	r.GET("/dashboard", admin, ctl.Dashboard.Page)
+	r.GET("/dashboard", ctl.Dashboard.Page)
 
-	v1 := r.Group("/v1")
-
-	callerV1 := v1.Group("", middlewares.RequireJWT())
-	callerV1.POST("/check", ctl.Check.Check)
-	callerV1.GET("/quota/:tenant/:namespace", ctl.Quota.Get)
-
-	adminV1 := v1.Group("", admin)
-	adminV1.POST("/rules", ctl.Rule.Create)
-	adminV1.GET("/rules", ctl.Rule.List)
-	adminV1.GET("/rules/:id", ctl.Rule.Get)
-	adminV1.PUT("/rules/:id", ctl.Rule.Update)
-	adminV1.DELETE("/rules/:id", ctl.Rule.Delete)
-	adminV1.POST("/feedback", ctl.Feedback.Submit)
-	adminV1.GET("/tenants/active", ctl.Dashboard.ActiveTenants)
+	v1 := r.Group("/v1", middlewares.RequireJWT())
+	v1.POST("/check", ctl.Check.Check)
+	v1.GET("/quota/:tenant/:namespace", ctl.Quota.Get)
+	v1.POST("/rules", ctl.Rule.Create)
+	v1.GET("/rules", ctl.Rule.List)
+	v1.GET("/rules/:id", ctl.Rule.Get)
+	v1.PUT("/rules/:id", ctl.Rule.Update)
+	v1.DELETE("/rules/:id", ctl.Rule.Delete)
+	v1.POST("/feedback", ctl.Feedback.Submit)
+	v1.GET("/tenants/active", ctl.Dashboard.ActiveTenants)
 }
 
 // AddInternalRoutes registers endpoints served only on the internal port,

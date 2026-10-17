@@ -14,7 +14,7 @@ func TestFeedback_TightensAndRelaxesLimits(t *testing.T) {
 	app := testutils.NewTestApp(t)
 	app.CreateRule(map[string]any{"tenant": "acme", "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 10})
 
-	resp := app.Admin(http.MethodPost, "/v1/feedback", map[string]any{"tenant": "acme", "namespace": "orders", "error_rate": 0.3})
+	resp := app.Caller(http.MethodPost, "/v1/feedback", map[string]any{"tenant": "acme", "namespace": "orders", "error_rate": 0.3})
 	require.Equal(t, http.StatusOK, resp.Status, "body: %s", resp.Body)
 	fb := resp.Map(t)
 	assert.Equal(t, 0.5, fb["adaptive_multiplier"])
@@ -24,7 +24,7 @@ func TestFeedback_TightensAndRelaxesLimits(t *testing.T) {
 	assert.EqualValues(t, 5, body["limit"], "capacity halved")
 	assert.Equal(t, 0.5, body["adaptive_multiplier"])
 
-	resp = app.Admin(http.MethodPost, "/v1/feedback", map[string]any{"tenant": "acme", "namespace": "orders", "error_rate": 0})
+	resp = app.Caller(http.MethodPost, "/v1/feedback", map[string]any{"tenant": "acme", "namespace": "orders", "error_rate": 0})
 	require.Equal(t, http.StatusOK, resp.Status)
 	assert.Equal(t, 1.0, resp.Map(t)["adaptive_multiplier"])
 	assert.EqualValues(t, 10, app.Check("acme", "orders", 0)["limit"])
@@ -39,7 +39,7 @@ func TestFeedback_Validation(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, http.StatusBadRequest, app.Admin(http.MethodPost, "/v1/feedback", body).Status)
+			assert.Equal(t, http.StatusBadRequest, app.Caller(http.MethodPost, "/v1/feedback", body).Status)
 		})
 	}
 	assert.Equal(t, http.StatusUnauthorized,

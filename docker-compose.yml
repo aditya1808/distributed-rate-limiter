@@ -1,13 +1,12 @@
 # Production-like local stack: two instances sharing one Redis behind an
 # nginx round-robin load balancer on http://localhost:8080.
 #
-#   ADMIN_TOKEN=$(openssl rand -hex 32) docker compose up --build -d
+#   docker compose up --build -d
 x-app: &app
   build: .
   image: distributed-rate-limiter:local
   environment: &app-env
     REDIS_URL: redis://redis:6379/0
-    ADMIN_TOKEN: ${ADMIN_TOKEN:-local-dev-admin-token-change-me}
     LOG_LEVEL: info
     SHUTDOWN_DRAIN_DELAY: 2s
   depends_on:

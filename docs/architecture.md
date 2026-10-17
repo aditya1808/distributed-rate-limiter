@@ -11,13 +11,13 @@ store's own clock.
 
 ```mermaid
 flowchart LR
-    client([Client service]) -->|POST /v1/check| lb[Load balancer]
-    admin([Operator]) -->|/v1/rules, /v1/feedback, /dashboard<br/>admin token| lb
+    client([Client service]) -->|POST /v1/check<br/>Bearer JWT| lb[Load balancer]
+    admin([Operator]) -->|/v1/rules, /v1/feedback<br/>Bearer JWT| lb
     lb --> i1 & i2
 
     subgraph i1 [Instance 1]
         direction TB
-        mw1[Middlewares<br/>recovery, request id, body limit,<br/>access log, metrics, admin auth] --> ctl1[Controllers]
+        mw1[Middlewares<br/>recovery, request id, body limit,<br/>access log, metrics, JWT check] --> ctl1[Controllers]
         ctl1 --> ev1[Evaluator]
         ctl1 --> rm1[Rule manager]
         ev1 --> rc1[(Rule cache<br/>atomic snapshot)]

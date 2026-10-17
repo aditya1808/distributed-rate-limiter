@@ -34,7 +34,7 @@ a cross-instance load test against the public URL.
 
 - URL: <https://rate-limiter-dgmu7.ondigitalocean.app> (try
   `curl -s https://rate-limiter-dgmu7.ondigitalocean.app/readyz`)
-- Admin endpoints and the dashboard require the admin token.
+- Every `/v1` endpoint requires a Bearer JWT; the dashboard (`/dashboard`) is public.
 
 Results from the CI deploy job (GitHub-hosted runner → DigitalOcean blr1, a new
 TLS connection per request so the platform load balancer spreads traffic):
@@ -61,16 +61,15 @@ Requirements: Go 1.26+, Docker.
 
 ```bash
 # Two instances + Redis behind nginx on http://localhost:8080
-export ADMIN_TOKEN=$(openssl rand -hex 32)
 make up
+
+# Every /v1 endpoint needs a Bearer JWT (format-checked only for now, see Limitations)
+JWT=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vIn0.c2lnbmF0dXJl
 
 # Create a rule: 10 requests/second sustained, bursts of up to 20
 curl -s -X POST localhost:8080/v1/rules \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
   -d '{"tenant":"acme","namespace":"orders","algorithm":"token_bucket","limit":10,"period":"1s","burst":20}'
-
-# Decision endpoints need a Bearer JWT (format-checked only for now, see Limitations)
-JWT=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vIn0.c2lnbmF0dXJl
 
 # Ask for a decision
 curl -s -X POST localhost:8080/v1/check -H "Authorization: Bearer $JWT" -d '{"tenant":"acme","namespace":"orders"}'
@@ -83,7 +82,7 @@ curl -s localhost:8080/v1/quota/acme/orders -H "Authorization: Bearer $JWT"
 # Prove cross-instance correctness: exactly the burst is admitted, split across both instances
 make e2e load
 
-# Dashboard: http://localhost:8080/dashboard  (any username, admin token as password)
+# Dashboard (public, no login): http://localhost:8080/dashboard
 ```
 
 Run the test suite (needs a Redis on `localhost:6379`; `make redis` starts one):
@@ -100,12 +99,12 @@ make lint
 |---|---|---|---|
 | `POST` | `/v1/check` | JWT | Decide and consume quota: `{tenant, namespace, cost?}` |
 | `GET` | `/v1/quota/{tenant}/{namespace}` | JWT | Current quota without consuming |
-| `POST` | `/v1/rules` | admin | Create a rule |
-| `GET` | `/v1/rules` | admin | List rules (`?tenant=&namespace=`) |
-| `GET` `PUT` `DELETE` | `/v1/rules/{id}` | admin | Read, replace (`If-Match` required), delete |
-| `POST` | `/v1/feedback` | admin | Report downstream error rate → adaptive limit |
-| `GET` | `/v1/tenants/active` | admin | Recently active tenants with quota (dashboard data) |
-| `GET` | `/dashboard` | admin | HTML dashboard |
+| `POST` | `/v1/rules` | JWT | Create a rule |
+| `GET` | `/v1/rules` | JWT | List rules (`?tenant=&namespace=`) |
+| `GET` `PUT` `DELETE` | `/v1/rules/{id}` | JWT | Read, replace (`If-Match` required), delete |
+| `POST` | `/v1/feedback` | JWT | Report downstream error rate → adaptive limit |
+| `GET` | `/v1/tenants/active` | JWT | Recently active tenants with quota (JSON) |
+| `GET` | `/dashboard` | none | Server-rendered HTML dashboard, auto-refreshes |
 | `GET` | `/healthz`, `/readyz` | none | Liveness, readiness |
 | `GET` | `:9090/metrics` | internal port | Prometheus |
 
@@ -119,11 +118,12 @@ Design choices worth calling out:
   `X-Request-ID` and `X-Instance-ID` are returned for tracing.
 - **Errors are RFC 7807** `application/problem+json` with per-field validation
   messages.
-- **Decision endpoints require a Bearer JWT.** Today only its format is
+- **Every `/v1` endpoint requires a Bearer JWT.** Today only its format is
   checked (three base64url segments, JSON header with a real `alg`, JSON
   payload, non-empty signature); full verification is a tracked TODO.
-- **Admin auth** is a bearer token (or Basic with the token as password, for
-  the dashboard in a browser), compared in constant time. Metrics live on a
+- **The dashboard is public and read-only.** It is rendered on the server
+  (no JavaScript, no API calls from the browser) and refreshes itself every
+  2 seconds. Metrics live on a
   separate port that is never exposed publicly. The OpenAPI spec is in the
   repo, not served.
 - **Optimistic concurrency** on rules: `ETag` on every read, `If-Match`
@@ -222,7 +222,6 @@ test against the public URL.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ADMIN_TOKEN` | required | ≥ 16 characters |
 | `REDIS_URL` | `redis://localhost:6379/0` | `rediss://` for TLS |
 | `REDIS_TIMEOUT` | `50ms` | Hard limit per store call on the hot path |
 | `REDIS_POOL_SIZE` | `50` | |
@@ -242,8 +241,8 @@ test against the public URL.
 The app spec is [.do/app.yaml](.do/app.yaml): two `apps-s-1vcpu-1gb`
 instances, readiness on `/readyz`, liveness on `/healthz`, `REDIS_URL` bound to
 the managed Valkey cluster (`${rl-valkey.DATABASE_URL}`, TLS, trusted-source
-restricted to the app). `ADMIN_TOKEN` is a GitHub secret injected as an App
-Platform secret at deploy time; nothing sensitive is committed.
+restricted to the app). The only CI secret is the DigitalOcean API token;
+nothing sensitive is committed.
 
 Valkey runs with `maxmemory-policy volatile-ttl`. Rules have no TTL, so they
 are never evicted. Under memory pressure the quota keys closest to expiry go
@@ -261,7 +260,7 @@ To recreate from scratch:
 ```bash
 doctl databases create rl-valkey --engine valkey --version 8 --region blr1 --size db-s-1vcpu-1gb
 doctl databases configuration update <db-id> --engine valkey --config-json '{"valkey_maxmemory_policy":"volatile-ttl","valkey_timeout":0}'
-IMAGE_TAG=<sha> ADMIN_TOKEN=... envsubst '$IMAGE_TAG $ADMIN_TOKEN' < .do/app.yaml > /tmp/app.yaml
+IMAGE_TAG=<sha> envsubst '$IMAGE_TAG' < .do/app.yaml > /tmp/app.yaml
 doctl apps create --spec /tmp/app.yaml --wait
 gh variable set DO_APP_ID -b <app-id>; gh variable set DO_APP_URL -b <url>   # enables CD
 ```
@@ -273,7 +272,7 @@ main.go            process lifecycle, graceful shutdown, healthcheck subcommand
 core/              dependency wiring
 config/            environment configuration
 routes/            route table
-middlewares/       recovery, request id, body limit, access log, metrics, admin auth
+middlewares/       recovery, request id, body limit, access log, metrics, JWT format check
 controllers/       HTTP handlers (+ HTTP integration tests)
 schemas/           request/response wire types
 validations/       custom validators
@@ -306,14 +305,13 @@ docs/              architecture and ADRs
   Redis shard. Mitigations: local pre-admission (lease a block of tokens per
   instance) for very high limits.
 - **TODO: real authentication and authorization.** Auth was not part of the
-  brief, so the JWT on decision endpoints is only format-checked: any
-  well-formed token is accepted. Before production:
+  brief, so the JWT on every `/v1` endpoint is only format-checked: any
+  well-formed token is accepted, including for rule management. Before production:
   - authn: verify signatures against the identity provider's JWKS
     (RS256/ES256 only) and check `iss`, `aud`, `exp`, `nbf`;
   - authz: per-route scopes (`ratelimit:check`, `ratelimit:admin`) and a
     `tenants` claim so a caller can only consume its own tenants' quota;
-  - replace the shared `ADMIN_TOKEN` with the same scheme and audit-log rule
-    changes with the caller identity.
+  - audit-log rule changes with the caller identity (`sub`).
 - **Total store outage** takes every instance out of readiness, so the load
   balancer answers `503`; callers should apply their own fallback (ADR 0004).
 - **Sliding window memory** is O(limit) per key, hence the 10,000 cap.

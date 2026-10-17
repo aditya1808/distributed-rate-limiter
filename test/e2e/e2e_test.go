@@ -3,11 +3,10 @@
 // Package e2e runs against a real deployment over HTTP only:
 //
 //	E2E_BASE_URLS      comma-separated base URLs (several instances, or one load balancer)
-//	E2E_ADMIN_TOKEN    admin token for the rules API
 //	E2E_FRESH_CONNS    "true" opens a new connection per request so a load
 //	                   balancer actually spreads requests across instances
 //	E2E_MIN_INSTANCES  minimum distinct X-Instance-ID values that must serve traffic
-//	E2E_JWT            JWT for the decision endpoints (defaults to a well-formed test token)
+//	E2E_JWT            JWT for every /v1 route (defaults to a well-formed test token)
 package e2e
 
 import (
@@ -35,7 +34,6 @@ const defaultJWT = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMmUifQ.c2ln
 
 type env struct {
 	urls         []string
-	token        string
 	jwt          string
 	client       *http.Client
 	minInstances int
@@ -53,18 +51,16 @@ func setup(t *testing.T) env {
 			urls = append(urls, u)
 		}
 	}
-	token := os.Getenv("E2E_ADMIN_TOKEN")
-	require.NotEmpty(t, token, "E2E_ADMIN_TOKEN must be set")
 	minInstances, _ := strconv.Atoi(os.Getenv("E2E_MIN_INSTANCES"))
 	transport := &http.Transport{MaxIdleConnsPerHost: 200, DisableKeepAlives: os.Getenv("E2E_FRESH_CONNS") == "true"}
 	jwt := os.Getenv("E2E_JWT")
 	if jwt == "" {
 		jwt = defaultJWT
 	}
-	return env{urls: urls, token: token, jwt: jwt, client: &http.Client{Transport: transport, Timeout: 15 * time.Second}, minInstances: max(minInstances, 1)}
+	return env{urls: urls, jwt: jwt, client: &http.Client{Transport: transport, Timeout: 15 * time.Second}, minInstances: max(minInstances, 1)}
 }
 
-func (e env) do(t *testing.T, method, url string, body any, admin bool, headers ...string) (int, http.Header, []byte) {
+func (e env) do(t *testing.T, method, url string, body any, headers ...string) (int, http.Header, []byte) {
 	t.Helper()
 	var r io.Reader
 	if body != nil {
@@ -74,11 +70,7 @@ func (e env) do(t *testing.T, method, url string, body any, admin bool, headers 
 	req, err := http.NewRequest(method, url, r)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
-	if admin {
-		req.Header.Set("Authorization", "Bearer "+e.token)
-	} else {
-		req.Header.Set("Authorization", "Bearer "+e.jwt)
-	}
+	req.Header.Set("Authorization", "Bearer "+e.jwt)
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
@@ -97,12 +89,12 @@ func uniqueTenant(t *testing.T) string {
 
 func (e env) createRule(t *testing.T, rule map[string]any) string {
 	t.Helper()
-	status, _, body := e.do(t, http.MethodPost, e.urls[0]+"/v1/rules", rule, true)
+	status, _, body := e.do(t, http.MethodPost, e.urls[0]+"/v1/rules", rule)
 	require.Equal(t, http.StatusCreated, status, "create rule: %s", body)
 	var created map[string]any
 	require.NoError(t, json.Unmarshal(body, &created))
 	id := created["id"].(string)
-	t.Cleanup(func() { e.do(t, http.MethodDelete, e.urls[0]+"/v1/rules/"+id, nil, true) })
+	t.Cleanup(func() { e.do(t, http.MethodDelete, e.urls[0]+"/v1/rules/"+id, nil) })
 	// Give every instance's cache time to receive the change event.
 	time.Sleep(500 * time.Millisecond)
 	return id
@@ -111,7 +103,7 @@ func (e env) createRule(t *testing.T, rule map[string]any) string {
 func TestE2E_Health(t *testing.T) {
 	e := setup(t)
 	for _, u := range e.urls {
-		status, _, body := e.do(t, http.MethodGet, u+"/readyz", nil, false)
+		status, _, body := e.do(t, http.MethodGet, u+"/readyz", nil)
 		assert.Equal(t, http.StatusOK, status, "%s/readyz: %s", u, body)
 	}
 }
@@ -198,12 +190,12 @@ func TestE2E_RuleUpdateVisibleEverywhere(t *testing.T) {
 	id := e.createRule(t, rule)
 
 	rule["burst"] = 9
-	status, _, body := e.do(t, http.MethodPut, e.urls[len(e.urls)-1]+"/v1/rules/"+id, rule, true, "If-Match", `"1"`)
+	status, _, body := e.do(t, http.MethodPut, e.urls[len(e.urls)-1]+"/v1/rules/"+id, rule, "If-Match", `"1"`)
 	require.Equal(t, http.StatusOK, status, "update: %s", body)
 
 	require.Eventually(t, func() bool {
 		for i := 0; i < 10; i++ { // several requests so a load balancer hits every instance
-			_, _, b := e.do(t, http.MethodGet, e.urls[i%len(e.urls)]+fmt.Sprintf("/v1/quota/%s/orders", tenant), nil, false)
+			_, _, b := e.do(t, http.MethodGet, e.urls[i%len(e.urls)]+fmt.Sprintf("/v1/quota/%s/orders", tenant), nil)
 			var q map[string]any
 			if json.Unmarshal(b, &q) != nil || q["limit"] != float64(9) {
 				return false
@@ -213,17 +205,21 @@ func TestE2E_RuleUpdateVisibleEverywhere(t *testing.T) {
 	}, 10*time.Second, 200*time.Millisecond, "every instance enforces the updated rule")
 }
 
-func TestE2E_AdminRequiresAuth(t *testing.T) {
-	e := setup(t)
-	status, _, _ := e.do(t, http.MethodGet, e.urls[0]+"/v1/rules", nil, false)
-	assert.Equal(t, http.StatusUnauthorized, status, "a caller JWT is not the admin token")
-}
-
-func TestE2E_CheckRequiresJWT(t *testing.T) {
+func TestE2E_RequiresJWT(t *testing.T) {
 	e := setup(t)
 	resp, err := e.client.Post(e.urls[0]+"/v1/check", "application/json",
 		strings.NewReader(`{"tenant":"acme","namespace":"orders"}`))
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	resp, err = e.client.Get(e.urls[0] + "/v1/rules")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	resp, err = e.client.Get(e.urls[0] + "/dashboard")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "the dashboard is public")
 }
