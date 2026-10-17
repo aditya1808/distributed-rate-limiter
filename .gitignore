@@ -1,0 +1,19 @@
+# Binaries
+/bin/
+/ratelimiter
+*.exe
+
+# Test and coverage output
+*.test
+*.out
+coverage.html
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
