@@ -28,7 +28,28 @@ load balancer, sharing a managed Valkey cluster. Every push to `main` is
 tested, built into an image, rolled out, and then verified by the e2e suite and
 a cross-instance load test against the public URL.
 
-DEPLOYMENT_RESULTS_PLACEHOLDER
+- URL: <https://rate-limiter-dgmu7.ondigitalocean.app> (try
+  `curl -s https://rate-limiter-dgmu7.ondigitalocean.app/readyz`)
+- Admin endpoints and the dashboard require the admin token.
+
+Results from the CI deploy job (GitHub-hosted runner → DigitalOcean blr1, a new
+TLS connection per request so the platform load balancer spreads traffic):
+
+```
+e2e  token_bucket    allowed=50 errors=0 served_by=map[api-…-9dgpz:199 api-…-h8rhf:201]
+e2e  sliding_window  allowed=50 errors=0 served_by=map[api-…-9dgpz:190 api-…-h8rhf:210]
+
+load test: 2000 requests, 100 concurrent, burst 100, refill 1/h
+allowed: 100  denied: 1900  errors: 0  expected allowed: 100
+  api-7fc5856f85-9dgpz   served   989  allowed   54
+  api-7fc5856f85-h8rhf   served  1011  allowed   46
+latency p50 301ms  p95 336ms  p99 417ms   (client side, incl. US→India RTT + TLS handshake)
+```
+
+Both instances admitted part of the quota, and together they admitted exactly
+the burst. Server-side `/v1/check` latency from the access logs over 3,445
+production requests: p50 1.4 ms, p95 2.3 ms, p99 5.5 ms; the client-side
+figure is dominated by network distance and a fresh TLS handshake per request.
 
 ## Quick start
 
@@ -212,6 +233,22 @@ instances, readiness on `/readyz`, liveness on `/healthz`, `REDIS_URL` bound to
 the managed Valkey cluster (`${rl-valkey.DATABASE_URL}`, TLS, trusted-source
 restricted to the app). `ADMIN_TOKEN` is a GitHub secret injected as an App
 Platform secret at deploy time; nothing sensitive is committed.
+
+Valkey runs with `maxmemory-policy volatile-ttl`. Rules have no TTL, so they
+are never evicted. Under memory pressure the quota keys closest to expiry go
+first; for a token bucket that is the bucket closest to full, so evicting it
+barely changes any decision. The default `noeviction` would instead fail every
+write and degrade every decision.
+
+To recreate from scratch:
+
+```bash
+doctl databases create rl-valkey --engine valkey --version 8 --region blr1 --size db-s-1vcpu-1gb
+doctl databases configuration update <db-id> --engine valkey --config-json '{"valkey_maxmemory_policy":"volatile-ttl"}'
+IMAGE_TAG=<sha> ADMIN_TOKEN=... envsubst '$IMAGE_TAG $ADMIN_TOKEN' < .do/app.yaml > /tmp/app.yaml
+doctl apps create --spec /tmp/app.yaml --wait
+gh variable set DO_APP_ID -b <app-id>; gh variable set DO_APP_URL -b <url>   # enables CD
+```
 
 ## Project layout
 
