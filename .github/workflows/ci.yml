@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify modules
+        run: |
+          go mod verify
+          go mod tidy -diff
+
+      - name: Vet
+        run: go vet -tags e2e ./...
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: Test (race detector)
+        run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Stress concurrency tests
+        run: go test -race -count=5 -run 'Concurrent|Contention|MultiInstance|Exact' ./limiter/... ./test/...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  image:
+    name: Build image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          build-args: VERSION=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to DigitalOcean
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DO_APP_ID != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.DO_APP_URL }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Roll out ${{ github.sha }}
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          spec="$RUNNER_TEMP/app.yaml"
+          envsubst '$IMAGE_TAG $ADMIN_TOKEN' < .do/app.yaml > "$spec"
+          doctl apps update "${{ vars.DO_APP_ID }}" --spec "$spec" --wait --format ID,DefaultIngress
+          rm -f "$spec"
+
+      - name: End-to-end tests against production
+        env:
+          E2E_BASE_URLS: ${{ vars.DO_APP_URL }}
+          E2E_ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          E2E_FRESH_CONNS: "true"
+          E2E_MIN_INSTANCES: "2"
+        run: go test -tags e2e -count=1 -v ./test/e2e/
+
+      - name: Cross-instance load test
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: go run ./tools/loadtest -urls "${{ vars.DO_APP_URL }}" -n 2000 -c 100 -burst 100 -fresh-conns -min-instances 2

@@ -1,0 +1,59 @@
+# DigitalOcean App Platform spec. ${IMAGE_TAG} and ${ADMIN_TOKEN} are filled in
+# at deploy time (envsubst in CI); ${rl-valkey.DATABASE_URL} is an App Platform
+# binding resolved by DigitalOcean and must be left as-is.
+name: rate-limiter
+region: blr
+
+services:
+  - name: api
+    image:
+      registry_type: GHCR
+      registry: aditya1808
+      repository: distributed-rate-limiter
+      tag: ${IMAGE_TAG}
+    instance_count: 2
+    instance_size_slug: apps-s-1vcpu-1gb
+    http_port: 8080
+    health_check:
+      http_path: /readyz
+      initial_delay_seconds: 5
+      period_seconds: 5
+      timeout_seconds: 2
+      failure_threshold: 3
+    liveness_health_check:
+      http_path: /healthz
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 2
+      failure_threshold: 3
+    envs:
+      - key: REDIS_URL
+        scope: RUN_TIME
+        value: ${rl-valkey.DATABASE_URL}
+      - key: ADMIN_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: ${ADMIN_TOKEN}
+      - key: REDIS_TIMEOUT
+        scope: RUN_TIME
+        value: 100ms
+      - key: LOG_LEVEL
+        scope: RUN_TIME
+        value: info
+      - key: SHUTDOWN_DRAIN_DELAY
+        scope: RUN_TIME
+        value: 5s
+
+ingress:
+  rules:
+    - component:
+        name: api
+      match:
+        path:
+          prefix: /
+
+databases:
+  - name: rl-valkey
+    engine: VALKEY
+    production: true
+    cluster_name: rl-valkey

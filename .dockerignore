@@ -1,0 +1,8 @@
+.git
+.github
+.do
+docs
+*.md
+bin
+coverage.*
+*.out
