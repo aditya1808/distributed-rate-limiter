@@ -50,6 +50,7 @@ func TestMultiInstance_ExactAdmissionUnderContention(t *testing.T) {
 			urls := []string{a.BaseURL, b.BaseURL}
 			var (
 				allowed   atomic.Int64
+				served    [2]atomic.Int64
 				perServer [2]atomic.Int64
 				wg        sync.WaitGroup
 				start     = make(chan struct{})
@@ -72,6 +73,7 @@ func TestMultiInstance_ExactAdmissionUnderContention(t *testing.T) {
 						t.Errorf("decode %d: %v", i, err)
 						return
 					}
+					served[i%2].Add(1)
 					if r.Allowed {
 						allowed.Add(1)
 						perServer[i%2].Add(1)
@@ -82,8 +84,9 @@ func TestMultiInstance_ExactAdmissionUnderContention(t *testing.T) {
 			wg.Wait()
 
 			assert.EqualValues(t, burst, allowed.Load(), "two instances together must admit exactly the burst")
-			assert.Positive(t, perServer[0].Load(), "instance a admitted some requests")
-			assert.Positive(t, perServer[1].Load(), "instance b admitted some requests")
+			// Which instance wins the tokens is scheduling-dependent; only the total is fixed.
+			assert.EqualValues(t, requests/2, served[0].Load(), "instance a answered its share")
+			assert.EqualValues(t, requests/2, served[1].Load(), "instance b answered its share")
 			t.Logf("%s: allowed %d (a=%d, b=%d) of %d", algorithm, allowed.Load(), perServer[0].Load(), perServer[1].Load(), requests)
 		})
 	}
