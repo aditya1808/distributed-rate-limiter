@@ -19,6 +19,10 @@ import (
 
 const AdminToken = "test-admin-token-0123456789"
 
+// CallerToken is a well-formed JWT for the decision endpoints:
+// {"alg":"RS256","typ":"JWT"}.{"sub":"test-caller"}.<signature>
+const CallerToken = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0LWNhbGxlciJ9.c2lnbmF0dXJl"
+
 // TestApp is a complete service instance behind an httptest server.
 type TestApp struct {
 	App     *core.App
@@ -155,6 +159,24 @@ func (a *TestApp) Admin(method, path string, body any) Response {
 	return a.Do(method, path, body, AdminHeaders())
 }
 
+// CallerHeaders authenticates a request to the decision endpoints, merged
+// with any extra headers.
+func CallerHeaders(extra ...map[string]string) map[string]string {
+	h := map[string]string{"Authorization": "Bearer " + CallerToken}
+	for _, e := range extra {
+		for k, v := range e {
+			h[k] = v
+		}
+	}
+	return h
+}
+
+// Caller sends a request authenticated for the decision endpoints.
+func (a *TestApp) Caller(method, path string, body any) Response {
+	a.tb.Helper()
+	return a.Do(method, path, body, CallerHeaders())
+}
+
 // CreateRule creates a rule and fails the test unless it returns 201.
 func (a *TestApp) CreateRule(rule map[string]any) map[string]any {
 	a.tb.Helper()
@@ -171,7 +193,7 @@ func (a *TestApp) Check(tenant, namespace string, cost int) map[string]any {
 	if cost > 0 {
 		body["cost"] = cost
 	}
-	resp := a.Do(http.MethodPost, "/v1/check", body, nil)
+	resp := a.Caller(http.MethodPost, "/v1/check", body)
 	if resp.Status != http.StatusOK {
 		a.tb.Fatalf("check: status %d body %s", resp.Status, resp.Body)
 	}

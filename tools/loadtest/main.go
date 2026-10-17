@@ -22,6 +22,9 @@ import (
 	"time"
 )
 
+// defaultJWT is {"alg":"RS256","typ":"JWT"}.{"sub":"loadtest"}.<signature>
+const defaultJWT = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJsb2FkdGVzdCJ9.c2lnbmF0dXJl"
+
 type result struct {
 	allowed  bool
 	instance string
@@ -39,6 +42,7 @@ func main() {
 		concurrent = flag.Int("c", 200, "concurrent workers")
 		freshConns = flag.Bool("fresh-conns", false, "new connection per request so a load balancer spreads traffic")
 		minInst    = flag.Int("min-instances", 1, "fail if fewer distinct instances served traffic")
+		jwt        = flag.String("jwt", defaultJWT, "JWT sent to /v1/check")
 	)
 	flag.Parse()
 	if *token == "" {
@@ -78,7 +82,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				results <- check(client, urls[i%len(urls)], body)
+				results <- check(client, urls[i%len(urls)], *jwt, body)
 			}
 		}()
 	}
@@ -154,9 +158,15 @@ func main() {
 	fmt.Println("PASS")
 }
 
-func check(client *http.Client, base string, body []byte) result {
+func check(client *http.Client, base, jwt string, body []byte) result {
 	start := time.Now()
-	resp, err := client.Post(base+"/v1/check", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, base+"/v1/check", bytes.NewReader(body))
+	if err != nil {
+		return result{err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	resp, err := client.Do(req)
 	if err != nil {
 		return result{err: err}
 	}

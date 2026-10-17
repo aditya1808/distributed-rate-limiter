@@ -76,7 +76,7 @@ func TestCheck_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := app.Do(http.MethodPost, "/v1/check", tc.body, nil)
+			resp := app.Caller(http.MethodPost, "/v1/check", tc.body)
 			require.Equal(t, tc.wantStatus, resp.Status, "body: %s", resp.Body)
 			assert.Equal(t, "application/problem+json", resp.Header.Get("Content-Type"))
 			p := resp.Map(t)
@@ -93,12 +93,12 @@ func TestCheck_Validation(t *testing.T) {
 func TestCheck_RequestAndInstanceHeaders(t *testing.T) {
 	app := testutils.NewTestApp(t, testutils.WithInstanceID("instance-a"))
 	resp := app.Do(http.MethodPost, "/v1/check", map[string]any{"tenant": "acme", "namespace": "orders"},
-		map[string]string{"X-Request-ID": "trace-123"})
+		testutils.CallerHeaders(map[string]string{"X-Request-ID": "trace-123"}))
 	assert.Equal(t, "trace-123", resp.Header.Get("X-Request-ID"))
 	assert.Equal(t, "instance-a", resp.Header.Get("X-Instance-ID"))
 
 	resp = app.Do(http.MethodPost, "/v1/check", map[string]any{"tenant": "acme", "namespace": "orders"},
-		map[string]string{"X-Request-ID": "bad id with spaces"})
+		testutils.CallerHeaders(map[string]string{"X-Request-ID": "bad id with spaces"}))
 	assert.NotEqual(t, "bad id with spaces", resp.Header.Get("X-Request-ID"), "malformed ids are replaced")
 }
 
@@ -121,6 +121,22 @@ func TestCheck_StoreDownAppliesFailMode(t *testing.T) {
 
 	ready := app.Do(http.MethodGet, "/readyz", nil, nil)
 	assert.Equal(t, http.StatusServiceUnavailable, ready.Status)
+}
+
+func TestCheck_RequiresJWT(t *testing.T) {
+	app := testutils.NewTestApp(t)
+	body := map[string]any{"tenant": "acme", "namespace": "orders"}
+
+	resp := app.Do(http.MethodPost, "/v1/check", body, nil)
+	assert.Equal(t, http.StatusUnauthorized, resp.Status)
+	assert.Equal(t, "urn:ratelimiter:problem:unauthorized", resp.Map(t)["type"])
+
+	resp = app.Do(http.MethodPost, "/v1/check", body, map[string]string{"Authorization": "Bearer not-a-jwt"})
+	assert.Equal(t, http.StatusUnauthorized, resp.Status)
+	assert.Equal(t, "urn:ratelimiter:problem:invalid-token", resp.Map(t)["type"])
+
+	resp = app.Do(http.MethodPost, "/v1/check", body, testutils.AdminHeaders())
+	assert.Equal(t, http.StatusUnauthorized, resp.Status, "the admin token is not a JWT")
 }
 
 func TestUnknownRouteAndMethod(t *testing.T) {

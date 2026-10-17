@@ -7,6 +7,7 @@
 //	E2E_FRESH_CONNS    "true" opens a new connection per request so a load
 //	                   balancer actually spreads requests across instances
 //	E2E_MIN_INSTANCES  minimum distinct X-Instance-ID values that must serve traffic
+//	E2E_JWT            JWT for the decision endpoints (defaults to a well-formed test token)
 package e2e
 
 import (
@@ -29,9 +30,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// defaultJWT is {"alg":"RS256","typ":"JWT"}.{"sub":"e2e"}.<signature>
+const defaultJWT = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMmUifQ.c2lnbmF0dXJl"
+
 type env struct {
 	urls         []string
 	token        string
+	jwt          string
 	client       *http.Client
 	minInstances int
 }
@@ -52,7 +57,11 @@ func setup(t *testing.T) env {
 	require.NotEmpty(t, token, "E2E_ADMIN_TOKEN must be set")
 	minInstances, _ := strconv.Atoi(os.Getenv("E2E_MIN_INSTANCES"))
 	transport := &http.Transport{MaxIdleConnsPerHost: 200, DisableKeepAlives: os.Getenv("E2E_FRESH_CONNS") == "true"}
-	return env{urls: urls, token: token, client: &http.Client{Transport: transport, Timeout: 15 * time.Second}, minInstances: max(minInstances, 1)}
+	jwt := os.Getenv("E2E_JWT")
+	if jwt == "" {
+		jwt = defaultJWT
+	}
+	return env{urls: urls, token: token, jwt: jwt, client: &http.Client{Transport: transport, Timeout: 15 * time.Second}, minInstances: max(minInstances, 1)}
 }
 
 func (e env) do(t *testing.T, method, url string, body any, admin bool, headers ...string) (int, http.Header, []byte) {
@@ -67,6 +76,8 @@ func (e env) do(t *testing.T, method, url string, body any, admin bool, headers 
 	req.Header.Set("Content-Type", "application/json")
 	if admin {
 		req.Header.Set("Authorization", "Bearer "+e.token)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+e.jwt)
 	}
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
@@ -134,7 +145,10 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 				go func(i int) {
 					defer wg.Done()
 					<-start
-					resp, err := e.client.Post(e.urls[i%len(e.urls)]+"/v1/check", "application/json", bytes.NewReader(body))
+					req, _ := http.NewRequest(http.MethodPost, e.urls[i%len(e.urls)]+"/v1/check", bytes.NewReader(body))
+					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("Authorization", "Bearer "+e.jwt)
+					resp, err := e.client.Do(req)
 					if err != nil {
 						errs.Add(1)
 						return
@@ -191,5 +205,14 @@ func TestE2E_RuleUpdateVisibleEverywhere(t *testing.T) {
 func TestE2E_AdminRequiresAuth(t *testing.T) {
 	e := setup(t)
 	status, _, _ := e.do(t, http.MethodGet, e.urls[0]+"/v1/rules", nil, false)
-	assert.Equal(t, http.StatusUnauthorized, status)
+	assert.Equal(t, http.StatusUnauthorized, status, "a caller JWT is not the admin token")
+}
+
+func TestE2E_CheckRequiresJWT(t *testing.T) {
+	e := setup(t)
+	resp, err := e.client.Post(e.urls[0]+"/v1/check", "application/json",
+		strings.NewReader(`{"tenant":"acme","namespace":"orders"}`))
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }

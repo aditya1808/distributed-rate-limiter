@@ -62,7 +62,10 @@ func TestMultiInstance_ExactAdmissionUnderContention(t *testing.T) {
 				go func(i int) {
 					defer wg.Done()
 					<-start
-					resp, err := client.Post(urls[i%2]+"/v1/check", "application/json", bytes.NewReader(body))
+					req, _ := http.NewRequest(http.MethodPost, urls[i%2]+"/v1/check", bytes.NewReader(body))
+					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("Authorization", "Bearer "+testutils.CallerToken)
+					resp, err := client.Do(req)
 					if err != nil {
 						t.Errorf("request %d: %v", i, err)
 						return
@@ -120,6 +123,6 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 
 func ruleVisible(t *testing.T, app *testutils.TestApp, tenant, namespace string) bool {
 	t.Helper()
-	resp := app.Do(http.MethodGet, fmt.Sprintf("/v1/quota/%s/%s", tenant, namespace), nil, nil)
+	resp := app.Caller(http.MethodGet, fmt.Sprintf("/v1/quota/%s/%s", tenant, namespace), nil)
 	return resp.Status == http.StatusOK
 }

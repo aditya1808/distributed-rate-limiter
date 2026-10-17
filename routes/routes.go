@@ -23,8 +23,8 @@ type Controllers struct {
 	Dashboard *dashboard.Controller
 }
 
-// AddRoutes registers the public API. Everything that changes behaviour or
-// reveals other tenants sits behind admin auth.
+// AddRoutes registers the public API. Decisions require a JWT; everything that
+// changes behaviour or reveals other tenants sits behind admin auth.
 func AddRoutes(r *gin.Engine, ctl Controllers, adminToken string) {
 	admin := middlewares.AdminAuth(adminToken)
 
@@ -33,8 +33,10 @@ func AddRoutes(r *gin.Engine, ctl Controllers, adminToken string) {
 	r.GET("/dashboard", admin, ctl.Dashboard.Page)
 
 	v1 := r.Group("/v1")
-	v1.POST("/check", ctl.Check.Check)
-	v1.GET("/quota/:tenant/:namespace", ctl.Quota.Get)
+
+	callerV1 := v1.Group("", middlewares.RequireJWT())
+	callerV1.POST("/check", ctl.Check.Check)
+	callerV1.GET("/quota/:tenant/:namespace", ctl.Quota.Get)
 
 	adminV1 := v1.Group("", admin)
 	adminV1.POST("/rules", ctl.Rule.Create)

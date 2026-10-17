@@ -16,7 +16,7 @@ func TestQuota_PeekDoesNotConsume(t *testing.T) {
 	app.Check("acme", "orders", 2)
 
 	for i := 0; i < 3; i++ {
-		resp := app.Do(http.MethodGet, "/v1/quota/acme/orders", nil, nil)
+		resp := app.Caller(http.MethodGet, "/v1/quota/acme/orders", nil)
 		require.Equal(t, http.StatusOK, resp.Status, "body: %s", resp.Body)
 		q := resp.Map(t)
 		assert.EqualValues(t, 5, q["limit"])
@@ -32,7 +32,7 @@ func TestQuota_PeekDoesNotConsume(t *testing.T) {
 func TestQuota_DefaultRuleMatch(t *testing.T) {
 	app := testutils.NewTestApp(t)
 	app.CreateRule(map[string]any{"namespace": "orders", "algorithm": "sliding_window", "limit": 10, "period": "1m", "burst": 2, "burst_window": "1s"})
-	resp := app.Do(http.MethodGet, "/v1/quota/globex/orders", nil, nil)
+	resp := app.Caller(http.MethodGet, "/v1/quota/globex/orders", nil)
 	require.Equal(t, http.StatusOK, resp.Status)
 	q := resp.Map(t)
 	rule := q["rule"].(map[string]any)
@@ -43,11 +43,12 @@ func TestQuota_DefaultRuleMatch(t *testing.T) {
 
 func TestQuota_Errors(t *testing.T) {
 	app := testutils.NewTestApp(t)
-	assert.Equal(t, http.StatusNotFound, app.Do(http.MethodGet, "/v1/quota/acme/orders", nil, nil).Status)
-	assert.Equal(t, http.StatusBadRequest, app.Do(http.MethodGet, "/v1/quota/ac%3Ame/orders", nil, nil).Status)
+	assert.Equal(t, http.StatusUnauthorized, app.Do(http.MethodGet, "/v1/quota/acme/orders", nil, nil).Status, "JWT required")
+	assert.Equal(t, http.StatusNotFound, app.Caller(http.MethodGet, "/v1/quota/acme/orders", nil).Status)
+	assert.Equal(t, http.StatusBadRequest, app.Caller(http.MethodGet, "/v1/quota/ac%3Ame/orders", nil).Status)
 
 	app.CreateRule(map[string]any{"tenant": "acme", "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1s"})
 	require.NoError(t, app.App.Redis.Close())
-	assert.Equal(t, http.StatusServiceUnavailable, app.Do(http.MethodGet, "/v1/quota/acme/orders", nil, nil).Status,
+	assert.Equal(t, http.StatusServiceUnavailable, app.Caller(http.MethodGet, "/v1/quota/acme/orders", nil).Status,
 		"an observation has no safe fallback when the store is down")
 }

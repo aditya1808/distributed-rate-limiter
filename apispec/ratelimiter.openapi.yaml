@@ -26,6 +26,7 @@ paths:
       tags: [Decisions]
       operationId: checkQuota
       summary: Evaluate and consume quota
+      security: [{ jwtAuth: [] }]
       requestBody:
         required: true
         content:
@@ -38,6 +39,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CheckResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
 
   /v1/quota/{tenant}/{namespace}:
@@ -45,6 +47,7 @@ paths:
       tags: [Decisions]
       operationId: getQuota
       summary: Read current quota without consuming it
+      security: [{ jwtAuth: [] }]
       parameters:
         - $ref: '#/components/parameters/Tenant'
         - $ref: '#/components/parameters/Namespace'
@@ -55,6 +58,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/QuotaResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/Unavailable' }
 
@@ -250,6 +254,13 @@ paths:
 
 components:
   securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A well-formed JWT. Currently only the format is checked; signature, issuer,
+        audience and expiry verification are planned (see TODO in middlewares/jwt.go).
     bearerAuth:
       type: http
       scheme: bearer
