@@ -66,7 +66,6 @@ func main() {
 		rule["limit"] = *burst
 	}
 	ruleID := createRule(client, urls[0], *token, rule)
-	defer deleteRule(client, urls[0], *token, ruleID)
 	time.Sleep(500 * time.Millisecond) // let every instance's cache receive the change event
 
 	fmt.Printf("tenant=%s namespace=loadtest rule: %s burst=%d refill=1/h\n", tenant, *algorithm, *burst)
@@ -152,6 +151,8 @@ func main() {
 		fmt.Printf("FAIL: traffic reached %d instance(s), expected at least %d (try -fresh-conns behind a load balancer)\n", len(perInstance), *minInst)
 		ok = false
 	}
+	// Explicit, not deferred: os.Exit skips deferred calls.
+	deleteRule(client, urls[0], *token, ruleID)
 	if !ok {
 		os.Exit(1)
 	}

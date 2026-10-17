@@ -50,6 +50,9 @@ func NewEvaluator(rules RuleResolver, lim limiter.Limiter, activity ActivityReco
 // callers always get an answer within the store timeout.
 func (e *Evaluator) Evaluate(ctx context.Context, tenant, namespace string, cost int64) (types.Decision, error) {
 	d := types.Decision{Tenant: tenant, Namespace: namespace, Multiplier: 1}
+	// Every decision is activity, including unmatched traffic: the dashboard
+	// is where operators notice tenants that are missing a rule.
+	e.activity.Touch(tenant, namespace)
 
 	rule, _, ok := e.rules.Resolve(tenant, namespace)
 	if !ok {
@@ -91,7 +94,6 @@ func (e *Evaluator) Evaluate(ctx context.Context, tenant, namespace string, cost
 	if !res.Allowed {
 		d.Reason = types.ReasonQuotaExceeded
 	}
-	e.activity.Touch(tenant, namespace)
 	e.metrics.RecordDecision(rule.Namespace, string(rule.Algorithm), d.Allowed, d.Reason)
 	return d, nil
 }

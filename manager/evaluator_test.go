@@ -74,12 +74,13 @@ func TestEvaluate_DefaultRuleGivesEachTenantItsOwnKey(t *testing.T) {
 func TestEvaluate_NoRuleFollowsDefaultPolicy(t *testing.T) {
 	for _, allow := range []bool{true, false} {
 		lim := &fakeLimiter{}
-		e, _ := newEvaluator(fakeResolver{}, lim, allow)
+		e, act := newEvaluator(fakeResolver{}, lim, allow)
 		d, err := e.Evaluate(context.Background(), "acme", "orders", 1)
 		require.NoError(t, err)
 		assert.Equal(t, allow, d.Allowed)
 		assert.Equal(t, types.ReasonNoRule, d.Reason)
 		assert.Empty(t, lim.calls, "no store call without a rule")
+		assert.Equal(t, 1, act.touched, "unmatched traffic still shows on the dashboard")
 	}
 }
 
