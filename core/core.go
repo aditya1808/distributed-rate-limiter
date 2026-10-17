@@ -58,6 +58,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 
 	keys := constants.NewKeyspace(cfg.KeyPrefix)
 	m := metrics.New()
+	m.RegisterRedisPool(rdb.PoolStats)
 
 	lim := limiter.NewRedisLimiter(rdb)
 	if err := lim.Load(ctx); err != nil {
@@ -128,6 +129,36 @@ func (a *App) Close() error {
 	return a.Redis.Close()
 }
 
+// warmPool dials n connections before the instance can report ready, so the
+// first burst of traffic never pays for TLS dials inside REDIS_TIMEOUT.
+// Connections are held simultaneously to force n distinct dials, then
+// returned to the pool as idle.
+func warmPool(ctx context.Context, rdb *redis.Client, n int, log *slog.Logger) {
+	if n <= 0 {
+		return
+	}
+	start := time.Now()
+	conns := make([]*redis.Conn, 0, n)
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	for range n {
+		c := rdb.Conn()
+		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := c.Ping(pingCtx).Err()
+		cancel()
+		if err != nil {
+			_ = c.Close()
+			log.Warn("[CORE] redis pool warm-up incomplete", "dialed", len(conns), "target", n, "error", err)
+			return
+		}
+		conns = append(conns, c)
+	}
+	log.Info("[CORE] redis pool warmed", "connections", n, "duration_ms", time.Since(start).Milliseconds())
+}
+
 func connectRedis(ctx context.Context, cfg config.Config, log *slog.Logger) (*redis.Client, error) {
 	opts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
@@ -135,6 +166,9 @@ func connectRedis(ctx context.Context, cfg config.Config, log *slog.Logger) (*re
 	}
 	opts.PoolSize = cfg.RedisPoolSize
 	opts.MinIdleConns = cfg.RedisMinIdleConns
+	// Never retire idle connections client-side: a retired connection is
+	// re-dialed on the hot path. The store's own idle timeout must be off too.
+	opts.ConnMaxIdleTime = -1
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = time.Second
 	opts.WriteTimeout = time.Second
@@ -149,6 +183,7 @@ func connectRedis(ctx context.Context, cfg config.Config, log *slog.Logger) (*re
 		err = rdb.Ping(pingCtx).Err()
 		cancel()
 		if err == nil {
+			warmPool(ctx, rdb, cfg.RedisMinIdleConns, log)
 			return rdb, nil
 		}
 		if attempt == 8 || errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {

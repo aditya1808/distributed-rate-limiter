@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 )
 
 // Metrics owns a private registry so several app instances can coexist in
@@ -65,6 +66,26 @@ func New() *Metrics {
 		m.StoreDuration, m.RuleCacheSize, m.RuleReloads,
 	)
 	return m
+}
+
+// RegisterRedisPool exposes connection pool state. Misses mean a connection
+// was dialed on demand; timeouts mean a caller waited for a free connection.
+func (m *Metrics) RegisterRedisPool(stats func() *redis.PoolStats) {
+	counter := func(name, help string, v func(*redis.PoolStats) uint32) prometheus.Collector {
+		return prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help},
+			func() float64 { return float64(v(stats())) })
+	}
+	gauge := func(name, help string, v func(*redis.PoolStats) uint32) prometheus.Collector {
+		return prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help},
+			func() float64 { return float64(v(stats())) })
+	}
+	m.registry.MustRegister(
+		counter("redis_pool_hits_total", "Connections reused from the pool.", func(s *redis.PoolStats) uint32 { return s.Hits }),
+		counter("redis_pool_misses_total", "Connections dialed on demand because none was idle.", func(s *redis.PoolStats) uint32 { return s.Misses }),
+		counter("redis_pool_timeouts_total", "Waits for a free connection that timed out.", func(s *redis.PoolStats) uint32 { return s.Timeouts }),
+		gauge("redis_pool_connections", "Open connections.", func(s *redis.PoolStats) uint32 { return s.TotalConns }),
+		gauge("redis_pool_idle_connections", "Idle connections.", func(s *redis.PoolStats) uint32 { return s.IdleConns }),
+	)
 }
 
 func (m *Metrics) Handler() http.Handler {

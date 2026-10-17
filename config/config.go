@@ -44,7 +44,7 @@ func Load() (Config, error) {
 		RedisURL:            str("REDIS_URL", "redis://localhost:6379/0"),
 		RedisTimeout:        dur("REDIS_TIMEOUT", 50*time.Millisecond, &errs),
 		RedisPoolSize:       num("REDIS_POOL_SIZE", 50, &errs),
-		RedisMinIdleConns:   num("REDIS_MIN_IDLE_CONNS", 20, &errs),
+		RedisMinIdleConns:   num("REDIS_MIN_IDLE_CONNS", -1, &errs),
 		KeyPrefix:           str("KEY_PREFIX", "rl"),
 		RuleRefreshInterval: dur("RULE_REFRESH_INTERVAL", 5*time.Second, &errs),
 		AdminToken:          os.Getenv("ADMIN_TOKEN"),
@@ -64,6 +64,9 @@ func Load() (Config, error) {
 	}
 	if len(cfg.AdminToken) < minAdminTokenLen {
 		errs = append(errs, fmt.Errorf("ADMIN_TOKEN must be set and at least %d characters", minAdminTokenLen))
+	}
+	if cfg.RedisMinIdleConns == -1 {
+		cfg.RedisMinIdleConns = cfg.RedisPoolSize
 	}
 	if cfg.RedisPoolSize < 1 {
 		errs = append(errs, errors.New("REDIS_POOL_SIZE must be at least 1"))

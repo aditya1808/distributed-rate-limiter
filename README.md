@@ -226,7 +226,7 @@ test against the public URL.
 | `REDIS_URL` | `redis://localhost:6379/0` | `rediss://` for TLS |
 | `REDIS_TIMEOUT` | `50ms` | Hard limit per store call on the hot path |
 | `REDIS_POOL_SIZE` | `50` | |
-| `REDIS_MIN_IDLE_CONNS` | `20` | Pre-dialed connections, so bursts don't pay for TLS dials inside `REDIS_TIMEOUT` |
+| `REDIS_MIN_IDLE_CONNS` | `REDIS_POOL_SIZE` | Dialed before the instance reports ready and kept open, so bursts never pay for TLS dials inside `REDIS_TIMEOUT` |
 | `KEY_PREFIX` | `rl` | Isolates environments sharing a store |
 | `DEFAULT_POLICY` | `allow` | Decision when no rule matches (`allow` / `deny`) |
 | `RULE_REFRESH_INTERVAL` | `5s` | Full rule reload, repairs missed pub/sub |
@@ -251,11 +251,16 @@ first; for a token bucket that is the bucket closest to full, so evicting it
 barely changes any decision. The default `noeviction` would instead fail every
 write and degrade every decision.
 
+Valkey also runs with `timeout 0`: idle connections are never closed by the
+server. Each instance dials its whole pool before reporting ready and keeps
+it open, because a dial on the request path (TLS to the managed store) can
+exceed the 100 ms store deadline and turn decisions into degraded denies.
+
 To recreate from scratch:
 
 ```bash
 doctl databases create rl-valkey --engine valkey --version 8 --region blr1 --size db-s-1vcpu-1gb
-doctl databases configuration update <db-id> --engine valkey --config-json '{"valkey_maxmemory_policy":"volatile-ttl"}'
+doctl databases configuration update <db-id> --engine valkey --config-json '{"valkey_maxmemory_policy":"volatile-ttl","valkey_timeout":0}'
 IMAGE_TAG=<sha> ADMIN_TOKEN=... envsubst '$IMAGE_TAG $ADMIN_TOKEN' < .do/app.yaml > /tmp/app.yaml
 doctl apps create --spec /tmp/app.yaml --wait
 gh variable set DO_APP_ID -b <app-id>; gh variable set DO_APP_URL -b <url>   # enables CD

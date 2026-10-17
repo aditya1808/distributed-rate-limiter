@@ -49,6 +49,8 @@ func WithRedisURL(u string) Option { return func(c *config.Config) { c.RedisURL 
 
 func WithRedisTimeout(d time.Duration) Option { return func(c *config.Config) { c.RedisTimeout = d } }
 
+func WithMinIdleConns(n int) Option { return func(c *config.Config) { c.RedisMinIdleConns = n } }
+
 func NewTestApp(tb testing.TB, opts ...Option) *TestApp {
 	tb.Helper()
 	gin.SetMode(gin.TestMode)
