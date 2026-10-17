@@ -1,0 +1,519 @@
+openapi: 3.0.3
+info:
+  title: Distributed Rate Limiter
+  version: 1.0.0
+  description: |
+    Horizontally scalable rate limiting decision service. Instances share state in
+    Redis/Valkey; every decision is a single atomic Lua script, so results are correct
+    no matter which instance serves a request.
+
+    `POST /v1/check` returns 200 for both allowed and denied decisions. A denial is a
+    valid answer; translating it to `429 Too Many Requests` (with `Retry-After`) is the
+    calling gateway's responsibility.
+servers:
+  - url: http://localhost:8080
+    description: Local
+tags:
+  - name: Decisions
+  - name: Rules
+  - name: Adaptive
+  - name: Dashboard
+  - name: Health
+
+paths:
+  /v1/check:
+    post:
+      tags: [Decisions]
+      operationId: checkQuota
+      summary: Evaluate and consume quota
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckRequest' }
+      responses:
+        '200':
+          description: Decision (allowed or denied)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+
+  /v1/quota/{tenant}/{namespace}:
+    get:
+      tags: [Decisions]
+      operationId: getQuota
+      summary: Read current quota without consuming it
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+        - $ref: '#/components/parameters/Namespace'
+      responses:
+        '200':
+          description: Current quota state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuotaResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/rules:
+    post:
+      tags: [Rules]
+      operationId: createRule
+      summary: Create a rule
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleCreateRequest' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location: { schema: { type: string } }
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      tags: [Rules]
+      operationId: listRules
+      summary: List rules
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      parameters:
+        - name: tenant
+          in: query
+          schema: { type: string }
+        - name: namespace
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Rules
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/rules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Rules]
+      operationId: getRule
+      summary: Get a rule
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      responses:
+        '200':
+          description: Rule
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    put:
+      tags: [Rules]
+      operationId: updateRule
+      summary: Replace a rule (optimistic concurrency via If-Match)
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Current ETag of the rule. Required; omitting it returns 428.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Rule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      tags: [Rules]
+      operationId: deleteRule
+      summary: Delete a rule
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/feedback:
+    post:
+      tags: [Adaptive]
+      operationId: submitFeedback
+      summary: Report a downstream error rate to temporarily tighten limits
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeedbackRequest' }
+      responses:
+        '200':
+          description: Applied
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FeedbackResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/tenants/active:
+    get:
+      tags: [Dashboard]
+      operationId: listActiveTenants
+      summary: Recently active tenants with current quota
+      security: [{ bearerAuth: [] }, { basicAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 25 }
+      responses:
+        '200':
+          description: Active tenants
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActiveTenants' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      operationId: dashboard
+      summary: Quota utilization dashboard (HTML)
+      security: [{ basicAuth: [] }, { bearerAuth: [] }]
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: liveness
+      summary: Liveness probe (never checks dependencies)
+      responses:
+        '200':
+          description: Alive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Liveness' }
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readiness
+      summary: Readiness probe (Redis reachable, rules loaded, not shutting down)
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Any username; the admin token is the password.
+
+  parameters:
+    Tenant:
+      name: tenant
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Identifier' }
+    Namespace:
+      name: namespace
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/Identifier' }
+
+  headers:
+    ETag:
+      description: Rule version, quoted (e.g. "3"). Send it back as If-Match.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid admin token
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: A rule already exists for this tenant and namespace
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionFailed:
+      description: If-Match does not match the current version
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionRequired:
+      description: If-Match header missing
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Request body larger than 64 KiB
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: State store unavailable
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Identifier:
+      type: string
+      pattern: '^[a-zA-Z0-9_.-]{1,64}$'
+    TenantSelector:
+      type: string
+      description: A tenant identifier, or "*" for the namespace-wide default rule.
+      pattern: '^(\*|[a-zA-Z0-9_.-]{1,64})$'
+    Algorithm:
+      type: string
+      enum: [token_bucket, sliding_window]
+    Duration:
+      type: string
+      description: Go duration string, e.g. "500ms", "1s", "1m", "1h".
+      example: 1m
+
+    CheckRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant, namespace]
+      properties:
+        tenant: { $ref: '#/components/schemas/Identifier' }
+        namespace: { $ref: '#/components/schemas/Identifier' }
+        cost: { type: integer, minimum: 1, maximum: 1000, default: 1 }
+
+    CheckResponse:
+      type: object
+      required: [allowed, tenant, namespace, limit, remaining, retry_after_ms, degraded, adaptive_multiplier]
+      properties:
+        allowed: { type: boolean }
+        tenant: { type: string }
+        namespace: { type: string }
+        rule_id: { type: string }
+        algorithm: { $ref: '#/components/schemas/Algorithm' }
+        limit: { type: integer }
+        remaining: { type: integer }
+        reset_at: { type: string, format: date-time }
+        retry_after_ms: { type: integer }
+        degraded:
+          type: boolean
+          description: True when the state store was unavailable and the rule's fail mode decided.
+        reason:
+          type: string
+          enum: [quota_exceeded, no_rule, cost_exceeds_capacity, store_unavailable]
+        adaptive_multiplier: { type: number }
+
+    QuotaResponse:
+      type: object
+      required: [tenant, namespace, rule, limit, used, remaining, reset_at, adaptive_multiplier]
+      properties:
+        tenant: { type: string }
+        namespace: { type: string }
+        rule:
+          type: object
+          required: [id, algorithm, limit, period, burst, version, matched]
+          properties:
+            id: { type: string }
+            algorithm: { $ref: '#/components/schemas/Algorithm' }
+            limit: { type: integer }
+            period: { $ref: '#/components/schemas/Duration' }
+            burst: { type: integer }
+            burst_window: { $ref: '#/components/schemas/Duration' }
+            version: { type: integer }
+            matched: { type: string, enum: [tenant, default] }
+        limit: { type: integer }
+        used: { type: integer }
+        remaining: { type: integer }
+        reset_at: { type: string, format: date-time }
+        adaptive_multiplier: { type: number }
+
+    RuleCreateRequest:
+      type: object
+      required: [namespace, algorithm, limit, period]
+      properties:
+        tenant:
+          allOf: [{ $ref: '#/components/schemas/TenantSelector' }]
+          default: '*'
+        namespace: { $ref: '#/components/schemas/Identifier' }
+        algorithm: { $ref: '#/components/schemas/Algorithm' }
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          description: Sustained rate - requests per period. At most 10000 for sliding_window.
+        period: { $ref: '#/components/schemas/Duration' }
+        burst:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+          description: token_bucket - bucket capacity (defaults to limit). sliding_window - max requests per burst_window (0 = none).
+        burst_window: { $ref: '#/components/schemas/Duration' }
+        fail_open:
+          type: boolean
+          default: false
+          description: Decision when the state store is unavailable.
+
+    RuleUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/RuleCreateRequest'
+        - type: object
+          required: [tenant]
+
+    Rule:
+      type: object
+      required: [id, tenant, namespace, algorithm, limit, period, burst, fail_open, version, created_at, updated_at]
+      properties:
+        id: { type: string }
+        tenant: { $ref: '#/components/schemas/TenantSelector' }
+        namespace: { $ref: '#/components/schemas/Identifier' }
+        algorithm: { $ref: '#/components/schemas/Algorithm' }
+        limit: { type: integer }
+        period: { $ref: '#/components/schemas/Duration' }
+        burst: { type: integer }
+        burst_window: { $ref: '#/components/schemas/Duration' }
+        fail_open: { type: boolean }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RuleList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Rule' }
+        count: { type: integer }
+
+    FeedbackRequest:
+      type: object
+      required: [tenant, namespace, error_rate]
+      properties:
+        tenant: { $ref: '#/components/schemas/Identifier' }
+        namespace: { $ref: '#/components/schemas/Identifier' }
+        error_rate: { type: number, minimum: 0, maximum: 1 }
+        ttl_seconds: { type: integer, minimum: 30, maximum: 3600, default: 300 }
+
+    FeedbackResponse:
+      type: object
+      required: [tenant, namespace, adaptive_multiplier]
+      properties:
+        tenant: { type: string }
+        namespace: { type: string }
+        adaptive_multiplier: { type: number }
+        expires_at: { type: string, format: date-time }
+
+    ActiveTenants:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [tenant, namespace, last_seen]
+            properties:
+              tenant: { type: string }
+              namespace: { type: string }
+              last_seen: { type: string, format: date-time }
+              quota: { $ref: '#/components/schemas/QuotaResponse' }
+        count: { type: integer }
+
+    Liveness:
+      type: object
+      required: [status, instance]
+      properties:
+        status: { type: string }
+        instance: { type: string }
+
+    Readiness:
+      type: object
+      required: [status, instance, checks]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        instance: { type: string }
+        checks:
+          type: object
+          properties:
+            redis: { type: string, enum: [up, down] }
+            rules_loaded: { type: boolean }
+            shutting_down: { type: boolean }
+
+    Problem:
+      type: object
+      description: RFC 7807 problem details
+      required: [type, title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, description: Request ID }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }

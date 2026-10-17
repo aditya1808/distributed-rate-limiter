@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rate Limiter - Quota Utilization</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --text:#e6e8ee; --muted:#8b93a7; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --bar:#2a2f3a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--bar); display:flex; justify-content:space-between; align-items:center; }
+  h1 { font-size:18px; margin:0; }
+  .meta { color:var(--muted); font-size:12px; }
+  main { padding:24px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:8px; overflow:hidden; }
+  th, td { padding:10px 12px; text-align:left; border-bottom:1px solid var(--bar); }
+  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .bar { height:8px; background:var(--bar); border-radius:4px; overflow:hidden; min-width:160px; }
+  .fill { height:100%; transition:width .4s; }
+  .num { font-variant-numeric: tabular-nums; }
+  .tag { padding:2px 6px; border-radius:4px; background:var(--bar); font-size:12px; }
+  .adapt { color:var(--warn); }
+  .empty { color:var(--muted); padding:24px; text-align:center; }
+  .err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Quota utilization</h1>
+  <div class="meta">Refreshes every second &middot; <span id="status">loading</span></div>
+</header>
+<main>
+  <table>
+    <thead>
+      <tr><th>Tenant</th><th>Namespace</th><th>Algorithm</th><th>Utilization</th><th>Used / Limit</th><th>Resets</th><th>Adaptive</th><th>Last seen</th></tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="8" class="empty">Waiting for traffic...</td></tr></tbody>
+  </table>
+</main>
+<script>
+const rows = document.getElementById("rows");
+const statusEl = document.getElementById("status");
+
+function color(pct) { return pct >= 90 ? "var(--bad)" : pct >= 70 ? "var(--warn)" : "var(--ok)"; }
+function ago(ts) { const s = Math.max(0, Math.round((Date.now() - new Date(ts)) / 1000)); return s < 60 ? s + "s ago" : Math.round(s / 60) + "m ago"; }
+function inSecs(ts) { const s = Math.max(0, Math.round((new Date(ts) - Date.now()) / 1000)); return s === 0 ? "now" : "in " + s + "s"; }
+function cell(text, cls) { const td = document.createElement("td"); if (cls) td.className = cls; td.textContent = text; return td; }
+
+async function refresh() {
+  try {
+    const res = await fetch("/v1/tenants/active?limit=50", { credentials: "same-origin" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    rows.replaceChildren();
+    if (data.items.length === 0) {
+      const tr = document.createElement("tr");
+      tr.appendChild(cell("No activity in the last hour", "empty")).colSpan = 8;
+      rows.appendChild(tr);
+    }
+    for (const item of data.items) {
+      const tr = document.createElement("tr");
+      const q = item.quota;
+      tr.appendChild(cell(item.tenant));
+      tr.appendChild(cell(item.namespace));
+      if (q) {
+        const pct = q.limit > 0 ? Math.round((q.used / q.limit) * 100) : 0;
+        const alg = cell(""); const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = q.rule.algorithm; alg.appendChild(tag);
+        tr.appendChild(alg);
+        const barTd = document.createElement("td"); const bar = document.createElement("div"); bar.className = "bar";
+        const fill = document.createElement("div"); fill.className = "fill"; fill.style.width = pct + "%"; fill.style.background = color(pct);
+        bar.appendChild(fill); barTd.appendChild(bar); tr.appendChild(barTd);
+        tr.appendChild(cell(q.used + " / " + q.limit + " (" + pct + "%)", "num"));
+        tr.appendChild(cell(inSecs(q.reset_at)));
+        tr.appendChild(cell(q.adaptive_multiplier === 1 ? "-" : "x" + q.adaptive_multiplier, q.adaptive_multiplier === 1 ? "" : "adapt"));
+      } else {
+        tr.appendChild(cell("no rule", "err")); tr.appendChild(cell("")); tr.appendChild(cell("")); tr.appendChild(cell("")); tr.appendChild(cell(""));
+      }
+      tr.appendChild(cell(ago(item.last_seen)));
+      rows.appendChild(tr);
+    }
+    statusEl.textContent = "updated " + new Date().toLocaleTimeString();
+    statusEl.className = "";
+  } catch (e) {
+    statusEl.textContent = "error: " + e.message;
+    statusEl.className = "err";
+  }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
