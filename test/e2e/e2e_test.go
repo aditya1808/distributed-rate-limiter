@@ -132,13 +132,14 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 
 			const requests = 400
 			var (
-				allowed atomic.Int64
-				errs    atomic.Int64
-				mu      sync.Mutex
-				served  = map[string]int{}
-				wg      sync.WaitGroup
-				start   = make(chan struct{})
-				body, _ = json.Marshal(map[string]any{"tenant": tenant, "namespace": "orders"})
+				allowed  atomic.Int64
+				degraded atomic.Int64
+				errs     atomic.Int64
+				mu       sync.Mutex
+				served   = map[string]int{}
+				wg       sync.WaitGroup
+				start    = make(chan struct{})
+				body, _  = json.Marshal(map[string]any{"tenant": tenant, "namespace": "orders"})
 			)
 			for i := 0; i < requests; i++ {
 				wg.Add(1)
@@ -155,7 +156,8 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 					}
 					defer resp.Body.Close()
 					var r struct {
-						Allowed bool `json:"allowed"`
+						Allowed  bool `json:"allowed"`
+						Degraded bool `json:"degraded"`
 					}
 					if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&r) != nil {
 						errs.Add(1)
@@ -163,6 +165,9 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 					}
 					if r.Allowed {
 						allowed.Add(1)
+					}
+					if r.Degraded {
+						degraded.Add(1)
 					}
 					mu.Lock()
 					served[resp.Header.Get("X-Instance-ID")]++
@@ -172,9 +177,15 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 			close(start)
 			wg.Wait()
 
-			t.Logf("allowed=%d errors=%d served_by=%v", allowed.Load(), errs.Load(), served)
+			t.Logf("allowed=%d degraded=%d errors=%d served_by=%v", allowed.Load(), degraded.Load(), errs.Load(), served)
 			assert.Zero(t, errs.Load())
-			assert.EqualValues(t, burst, allowed.Load(), "all instances together must admit exactly the burst")
+			assert.LessOrEqual(t, allowed.Load(), int64(burst), "instances together must never admit more than the burst")
+			// A store call that times out is ambiguous: the script may still run
+			// and consume a token while the caller gets a degraded deny. Each such
+			// response can hide at most one admission, so the gap is bounded by it.
+			assert.GreaterOrEqual(t, allowed.Load(), int64(burst)-degraded.Load(),
+				"every admission short of the burst must be explained by a degraded response")
+			assert.LessOrEqual(t, degraded.Load(), int64(requests/20), "degraded decisions must stay rare (<5%%)")
 			assert.GreaterOrEqual(t, len(served), e.minInstances, "requests must be served by at least %d instances", e.minInstances)
 		})
 	}

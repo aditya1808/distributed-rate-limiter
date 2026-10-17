@@ -134,7 +134,7 @@ func connectRedis(ctx context.Context, cfg config.Config, log *slog.Logger) (*re
 		return nil, fmt.Errorf("parse REDIS_URL: %w", err)
 	}
 	opts.PoolSize = cfg.RedisPoolSize
-	opts.MinIdleConns = min(4, cfg.RedisPoolSize)
+	opts.MinIdleConns = cfg.RedisMinIdleConns
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = time.Second
 	opts.WriteTimeout = time.Second

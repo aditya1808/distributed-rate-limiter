@@ -226,6 +226,7 @@ test against the public URL.
 | `REDIS_URL` | `redis://localhost:6379/0` | `rediss://` for TLS |
 | `REDIS_TIMEOUT` | `50ms` | Hard limit per store call on the hot path |
 | `REDIS_POOL_SIZE` | `50` | |
+| `REDIS_MIN_IDLE_CONNS` | `20` | Pre-dialed connections, so bursts don't pay for TLS dials inside `REDIS_TIMEOUT` |
 | `KEY_PREFIX` | `rl` | Isolates environments sharing a store |
 | `DEFAULT_POLICY` | `allow` | Decision when no rule matches (`allow` / `deny`) |
 | `RULE_REFRESH_INTERVAL` | `5s` | Full rule reload, repairs missed pub/sub |

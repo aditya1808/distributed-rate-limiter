@@ -16,7 +16,10 @@ type Config struct {
 	RedisURL      string
 	RedisTimeout  time.Duration
 	RedisPoolSize int
-	KeyPrefix     string
+	// RedisMinIdleConns keeps connections dialed ahead of demand: a cold dial
+	// (TLS to a managed store) inside REDIS_TIMEOUT turns into a degraded decision.
+	RedisMinIdleConns int
+	KeyPrefix         string
 
 	RuleRefreshInterval time.Duration
 	AdminToken          string
@@ -41,6 +44,7 @@ func Load() (Config, error) {
 		RedisURL:            str("REDIS_URL", "redis://localhost:6379/0"),
 		RedisTimeout:        dur("REDIS_TIMEOUT", 50*time.Millisecond, &errs),
 		RedisPoolSize:       num("REDIS_POOL_SIZE", 50, &errs),
+		RedisMinIdleConns:   num("REDIS_MIN_IDLE_CONNS", 20, &errs),
 		KeyPrefix:           str("KEY_PREFIX", "rl"),
 		RuleRefreshInterval: dur("RULE_REFRESH_INTERVAL", 5*time.Second, &errs),
 		AdminToken:          os.Getenv("ADMIN_TOKEN"),
@@ -60,6 +64,12 @@ func Load() (Config, error) {
 	}
 	if len(cfg.AdminToken) < minAdminTokenLen {
 		errs = append(errs, fmt.Errorf("ADMIN_TOKEN must be set and at least %d characters", minAdminTokenLen))
+	}
+	if cfg.RedisPoolSize < 1 {
+		errs = append(errs, errors.New("REDIS_POOL_SIZE must be at least 1"))
+	}
+	if cfg.RedisMinIdleConns < 0 || cfg.RedisMinIdleConns > cfg.RedisPoolSize {
+		errs = append(errs, errors.New("REDIS_MIN_IDLE_CONNS must be between 0 and REDIS_POOL_SIZE"))
 	}
 	if cfg.RedisTimeout <= 0 {
 		errs = append(errs, errors.New("REDIS_TIMEOUT must be positive"))

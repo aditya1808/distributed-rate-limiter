@@ -27,6 +27,7 @@ const defaultJWT = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJsb2FkdGVzdCJ
 
 type result struct {
 	allowed  bool
+	degraded bool
 	instance string
 	latency  time.Duration
 	err      error
@@ -94,10 +95,10 @@ func main() {
 	elapsed := time.Since(start)
 
 	var (
-		allowed, denied, errs int
-		latencies             []time.Duration
-		perInstance           = map[string][2]int{}
-		firstErr              error
+		allowed, denied, degraded, errs int
+		latencies                       []time.Duration
+		perInstance                     = map[string][2]int{}
+		firstErr                        error
 	)
 	for r := range results {
 		if r.err != nil {
@@ -110,6 +111,9 @@ func main() {
 		latencies = append(latencies, r.latency)
 		c := perInstance[r.instance]
 		c[0]++
+		if r.degraded {
+			degraded++
+		}
 		if r.allowed {
 			allowed++
 			c[1]++
@@ -120,7 +124,7 @@ func main() {
 	}
 
 	fmt.Printf("duration: %s  throughput: %.0f req/s\n", elapsed.Round(time.Millisecond), float64(*requests)/elapsed.Seconds())
-	fmt.Printf("allowed: %d  denied: %d  errors: %d  expected allowed: %d\n", allowed, denied, errs, *burst)
+	fmt.Printf("allowed: %d  denied: %d  degraded: %d  errors: %d  expected allowed: %d\n", allowed, denied, degraded, errs, *burst)
 	fmt.Println("by instance:")
 	names := make([]string, 0, len(perInstance))
 	for n := range perInstance {
@@ -143,8 +147,18 @@ func main() {
 		fmt.Printf("FAIL: %d request errors (first: %v)\n", errs, firstErr)
 		ok = false
 	}
-	if allowed != *burst {
-		fmt.Printf("FAIL: allowed %d, expected exactly %d\n", allowed, *burst)
+	if allowed > *burst {
+		fmt.Printf("FAIL: over-admission: allowed %d, burst %d\n", allowed, *burst)
+		ok = false
+	}
+	// A timed-out store call may still consume a token while returning a
+	// degraded deny, so each degraded response can hide one admission.
+	if allowed < *burst-degraded {
+		fmt.Printf("FAIL: allowed %d, expected %d (only %d explained by degraded responses)\n", allowed, *burst, degraded)
+		ok = false
+	}
+	if degraded*20 > *requests {
+		fmt.Printf("FAIL: %d degraded decisions (>5%%)\n", degraded)
 		ok = false
 	}
 	if len(perInstance) < *minInst {
@@ -177,12 +191,13 @@ func check(client *http.Client, base, jwt string, body []byte) result {
 		return result{err: fmt.Errorf("status %d: %s", resp.StatusCode, b)}
 	}
 	var r struct {
-		Allowed bool `json:"allowed"`
+		Allowed  bool `json:"allowed"`
+		Degraded bool `json:"degraded"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return result{err: err}
 	}
-	return result{allowed: r.Allowed, instance: resp.Header.Get("X-Instance-ID"), latency: time.Since(start)}
+	return result{allowed: r.Allowed, degraded: r.Degraded, instance: resp.Header.Get("X-Instance-ID"), latency: time.Since(start)}
 }
 
 func createRule(client *http.Client, base, token string, rule map[string]any) string {
