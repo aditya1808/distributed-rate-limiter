@@ -8,7 +8,6 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"github.com/aditya1808/distributed-rate-limiter/constants"
 	"github.com/aditya1808/distributed-rate-limiter/persistence"
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
@@ -89,32 +88,64 @@ func (m *RuleManager) ListRules(ctx context.Context) ([]types.Rule, error) {
 	return m.store.ListRules(ctx)
 }
 
-// Assign binds a rule to a pair, replacing any existing assignment.
-func (m *RuleManager) Assign(ctx context.Context, a types.Assignment) (types.Assignment, bool, error) {
+// CreateAssignment binds a rule to a pair that has no assignment yet.
+func (m *RuleManager) CreateAssignment(ctx context.Context, a types.Assignment) (types.Assignment, error) {
 	if err := a.Validate(); err != nil {
-		return types.Assignment{}, false, err
+		return types.Assignment{}, err
 	}
-	a.UpdatedAt = m.now().UTC().Truncate(time.Microsecond)
-	saved, created, err := m.store.PutAssignment(ctx, a)
-	if err != nil {
-		return types.Assignment{}, false, err
+	now := m.now().UTC().Truncate(time.Microsecond)
+	a.ID = "a_" + strings.ToLower(ulid.Make().String())
+	a.Version = 1
+	a.CreatedAt = now
+	a.UpdatedAt = now
+	if err := m.store.CreateAssignment(ctx, a); err != nil {
+		return types.Assignment{}, err
 	}
 	m.forget(ctx, a.Tenant, a.Namespace)
-	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: a.PairKey()})
-	return saved, created, nil
+	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: a.ID})
+	return a, nil
 }
 
-func (m *RuleManager) Unassign(ctx context.Context, tenant, namespace string) error {
-	if err := m.store.DeleteAssignment(ctx, tenant, namespace); err != nil {
+// UpdateAssignment replaces an assignment (its pair, its rule, or both) if
+// expectedVersion matches.
+func (m *RuleManager) UpdateAssignment(ctx context.Context, id string, a types.Assignment, expectedVersion int64) (types.Assignment, error) {
+	if err := a.Validate(); err != nil {
+		return types.Assignment{}, err
+	}
+	current, err := m.store.GetAssignment(ctx, id)
+	if err != nil {
+		return types.Assignment{}, err
+	}
+	if current.Version != expectedVersion {
+		return types.Assignment{}, types.ErrVersionMismatch
+	}
+	a.ID = id
+	a.Version = expectedVersion + 1
+	a.CreatedAt = current.CreatedAt
+	a.UpdatedAt = m.now().UTC().Truncate(time.Microsecond)
+	if err := m.store.UpdateAssignment(ctx, a, expectedVersion); err != nil {
+		return types.Assignment{}, err
+	}
+	m.forget(ctx, current.Tenant, current.Namespace)
+	if a.PairKey() != current.PairKey() {
+		m.forget(ctx, a.Tenant, a.Namespace)
+	}
+	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: id})
+	return a, nil
+}
+
+func (m *RuleManager) DeleteAssignment(ctx context.Context, id string) error {
+	deleted, err := m.store.DeleteAssignment(ctx, id)
+	if err != nil {
 		return err
 	}
-	m.forget(ctx, tenant, namespace)
-	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: constants.PairKey(tenant, namespace)})
+	m.forget(ctx, deleted.Tenant, deleted.Namespace)
+	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: id})
 	return nil
 }
 
-func (m *RuleManager) GetAssignment(ctx context.Context, tenant, namespace string) (types.Assignment, error) {
-	return m.store.GetAssignment(ctx, tenant, namespace)
+func (m *RuleManager) GetAssignment(ctx context.Context, id string) (types.Assignment, error) {
+	return m.store.GetAssignment(ctx, id)
 }
 
 func (m *RuleManager) ListAssignments(ctx context.Context, f persistence.AssignmentFilter) ([]types.Assignment, error) {

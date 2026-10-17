@@ -2,12 +2,14 @@ package rule
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
 type ruleFields struct {
+	Name        string `json:"name" binding:"required"`
 	Algorithm   string `json:"algorithm" binding:"required,oneof=token_bucket sliding_window"`
 	Limit       int64  `json:"limit" binding:"required,min=1,max=1000000"`
 	Period      string `json:"period" binding:"required"`
@@ -43,6 +45,7 @@ func (f ruleFields) toRule() (types.Rule, error) {
 		return types.Rule{}, types.NewValidationError(errs...)
 	}
 	return types.Rule{
+		Name:        strings.TrimSpace(f.Name),
 		Algorithm:   types.Algorithm(f.Algorithm),
 		Limit:       f.Limit,
 		Period:      period,
@@ -54,6 +57,7 @@ func (f ruleFields) toRule() (types.Rule, error) {
 
 type RuleResponseBody struct {
 	ID          string    `json:"id"`
+	Name        string    `json:"name"`
 	Algorithm   string    `json:"algorithm"`
 	Limit       int64     `json:"limit"`
 	Period      string    `json:"period"`
@@ -73,6 +77,7 @@ type RuleListResponseBody struct {
 func FromRule(r types.Rule) RuleResponseBody {
 	body := RuleResponseBody{
 		ID:        r.ID,
+		Name:      r.Name,
 		Algorithm: string(r.Algorithm),
 		Limit:     r.Limit,
 		Period:    FormatDuration(r.Period),

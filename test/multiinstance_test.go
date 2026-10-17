@@ -106,7 +106,7 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 	require.Eventually(t, func() bool { return ruleVisible(t, b, "acme", "orders") }, 2*time.Second, 10*time.Millisecond)
 	assert.EqualValues(t, 2, b.Check("acme", "orders", 0)["limit"])
 
-	update := map[string]any{"algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 7}
+	update := map[string]any{"name": "test rule", "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 7}
 	resp := a.Do(http.MethodPut, "/v1/rules/"+id, update, map[string]string{
 		"Authorization": "Bearer " + testutils.CallerToken, "If-Match": `"1"`,
 	})
@@ -117,12 +117,16 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "instance b enforces the new limit")
 
 	other := b.CreateRule(map[string]any{"algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 11})["id"].(string)
-	b.Assign("acme", "orders", other)
+	assignment := b.AssignmentFor("acme", "orders")["id"].(string)
+	resp = b.Do(http.MethodPut, "/v1/assignments/"+assignment,
+		map[string]any{"tenant": "acme", "namespace": "orders", "rule_id": other},
+		map[string]string{"Authorization": "Bearer " + testutils.CallerToken, "If-Match": `"1"`})
+	require.Equal(t, http.StatusOK, resp.Status, "body: %s", resp.Body)
 	require.Eventually(t, func() bool {
 		return a.Check("acme", "orders", 0)["rule_id"] == other
 	}, 2*time.Second, 10*time.Millisecond, "instance a follows a reassignment made on b")
 
-	assert.Equal(t, http.StatusNoContent, b.Caller(http.MethodDelete, "/v1/assignments/acme/orders", nil).Status)
+	assert.Equal(t, http.StatusNoContent, b.Caller(http.MethodDelete, "/v1/assignments/"+assignment, nil).Status)
 	require.Eventually(t, func() bool {
 		return a.Check("acme", "orders", 0)["reason"] == "no_rule"
 	}, 2*time.Second, 10*time.Millisecond, "instance a drops the removed assignment")

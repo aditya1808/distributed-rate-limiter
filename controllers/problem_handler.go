@@ -86,11 +86,14 @@ func HandleError(c *gin.Context, err error) {
 	case errors.Is(err, types.ErrRuleInUse):
 		WriteProblem(c, http.StatusConflict, "rule-in-use", "Rule is assigned",
 			"delete or reassign every assignment that uses this rule first", nil)
+	case errors.Is(err, types.ErrAssignmentExists):
+		WriteProblem(c, http.StatusConflict, "assignment-exists", "Assignment exists",
+			"this tenant and namespace already have an assignment; update it instead", nil)
 	case errors.Is(err, types.ErrUnknownRule):
 		Validation(c, []types.FieldError{{Field: "rule_id", Message: "no rule with this id"}})
 	case errors.Is(err, types.ErrVersionMismatch):
 		WriteProblem(c, http.StatusPreconditionFailed, "version-mismatch", "Version mismatch",
-			"the rule was modified; fetch it again and retry with the new ETag", nil)
+			"the resource was modified; fetch it again and retry with the new ETag", nil)
 	case errors.Is(err, types.ErrStoreUnavailable):
 		WriteProblem(c, http.StatusServiceUnavailable, "store-unavailable", "State store unavailable", "", nil)
 	case errors.Is(err, context.Canceled):

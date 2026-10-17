@@ -19,11 +19,16 @@ type RuleStore interface {
 	GetRule(ctx context.Context, id string) (types.Rule, error)
 	ListRules(ctx context.Context) ([]types.Rule, error)
 
-	// PutAssignment creates or replaces the assignment for its pair and
-	// reports whether it was created. types.ErrUnknownRule if the rule is missing.
-	PutAssignment(ctx context.Context, a types.Assignment) (types.Assignment, bool, error)
-	DeleteAssignment(ctx context.Context, tenant, namespace string) error
-	GetAssignment(ctx context.Context, tenant, namespace string) (types.Assignment, error)
+	// CreateAssignment fails with types.ErrAssignmentExists if the pair is
+	// taken and types.ErrUnknownRule if the rule is missing.
+	CreateAssignment(ctx context.Context, a types.Assignment) error
+	// UpdateAssignment replaces the assignment only if the stored version
+	// equals expectedVersion; errors as CreateAssignment plus
+	// types.ErrVersionMismatch.
+	UpdateAssignment(ctx context.Context, a types.Assignment, expectedVersion int64) error
+	// DeleteAssignment returns the deleted assignment.
+	DeleteAssignment(ctx context.Context, id string) (types.Assignment, error)
+	GetAssignment(ctx context.Context, id string) (types.Assignment, error)
 	ListAssignments(ctx context.Context, f AssignmentFilter) ([]types.Assignment, error)
 
 	// Bindings returns every assignment joined with its rule.

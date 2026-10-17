@@ -2,6 +2,7 @@ package types
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 func validRule() Rule {
-	return Rule{Algorithm: AlgorithmTokenBucket, Limit: 300, Period: time.Minute, Burst: 20}
+	return Rule{Name: "orders standard", Algorithm: AlgorithmTokenBucket, Limit: 300, Period: time.Minute, Burst: 20}
 }
 
 func fieldsOf(t *testing.T, err error) []string {
@@ -34,6 +35,10 @@ func TestRuleValidate(t *testing.T) {
 		{"valid sliding window with burst", func(r *Rule) {
 			r.Algorithm, r.Limit, r.Burst, r.BurstWindow = AlgorithmSlidingWindow, 1000, 10, time.Second
 		}, nil},
+		{"missing name", func(r *Rule) { r.Name = "" }, []string{"name"}},
+		{"blank name", func(r *Rule) { r.Name = "   " }, []string{"name"}},
+		{"name too long", func(r *Rule) { r.Name = strings.Repeat("é", MaxRuleName+1) }, []string{"name"}},
+		{"name at max length", func(r *Rule) { r.Name = strings.Repeat("é", MaxRuleName) }, nil},
 		{"unknown algorithm", func(r *Rule) { r.Algorithm = "leaky" }, []string{"algorithm"}},
 		{"zero limit", func(r *Rule) { r.Limit = 0 }, []string{"limit"}},
 		{"period too short", func(r *Rule) { r.Period = 500 * time.Millisecond }, []string{"period"}},

@@ -98,9 +98,12 @@ func (e env) assignRule(t *testing.T, tenant, namespace string, rule map[string]
 	id := created["id"].(string)
 	t.Cleanup(func() { e.do(t, http.MethodDelete, e.urls[0]+"/v1/rules/"+id, nil) })
 
-	path := fmt.Sprintf("%s/v1/assignments/%s/%s", e.urls[0], tenant, namespace)
-	status, _, body = e.do(t, http.MethodPut, path, map[string]any{"rule_id": id})
+	status, _, body = e.do(t, http.MethodPost, e.urls[0]+"/v1/assignments",
+		map[string]any{"tenant": tenant, "namespace": namespace, "rule_id": id})
 	require.Equal(t, http.StatusCreated, status, "assign rule: %s", body)
+	var assignment map[string]any
+	require.NoError(t, json.Unmarshal(body, &assignment))
+	path := e.urls[0] + "/v1/assignments/" + assignment["id"].(string)
 	t.Cleanup(func() { e.do(t, http.MethodDelete, path, nil) })
 	// Give every instance's cache time to receive the change event.
 	time.Sleep(500 * time.Millisecond)
@@ -121,7 +124,7 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 			e := setup(t)
 			tenant := uniqueTenant(t)
 			const burst = 50
-			rule := map[string]any{"algorithm": algorithm, "period": "1h"}
+			rule := map[string]any{"name": "e2e " + tenant, "algorithm": algorithm, "period": "1h"}
 			if algorithm == "token_bucket" {
 				rule["limit"], rule["burst"] = 1, burst
 			} else {
@@ -193,7 +196,7 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 func TestE2E_RuleUpdateVisibleEverywhere(t *testing.T) {
 	e := setup(t)
 	tenant := uniqueTenant(t)
-	rule := map[string]any{"algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 3}
+	rule := map[string]any{"name": "e2e " + tenant, "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 3}
 	id := e.assignRule(t, tenant, "orders", rule)
 
 	rule["burst"] = 9

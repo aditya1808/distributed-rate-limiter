@@ -10,6 +10,8 @@ import (
 // rule the default for every tenant in the namespace without its own
 // assignment. A pair has at most one assignment; a rule can serve many pairs.
 type Assignment struct {
+	ID        string    `json:"id"`
+	Version   int64     `json:"version"`
 	Tenant    string    `json:"tenant"`
 	Namespace string    `json:"namespace"`
 	RuleID    string    `json:"rule_id"`

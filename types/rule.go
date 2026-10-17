@@ -3,7 +3,9 @@ package types
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Algorithm string
@@ -23,6 +25,7 @@ const (
 	MinBurstWindow = 100 * time.Millisecond
 	MaxLimit       = 1_000_000
 	MaxCost        = 1_000
+	MaxRuleName    = 128
 
 	// MaxSlidingWindowLimit bounds memory: the sliding window log stores one
 	// sorted-set entry per admitted request.
@@ -41,6 +44,7 @@ var IdentifierPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 //   - sliding window: max requests within BurstWindow (0 disables the burst cap)
 type Rule struct {
 	ID          string        `json:"id"`
+	Name        string        `json:"name"`
 	Algorithm   Algorithm     `json:"algorithm"`
 	Limit       int64         `json:"limit"`
 	Period      time.Duration `json:"period"`
@@ -75,6 +79,9 @@ func (r Rule) Validate() error {
 		errs = append(errs, FieldError{Field: field, Message: fmt.Sprintf(msg, args...)})
 	}
 
+	if strings.TrimSpace(r.Name) == "" || utf8.RuneCountInString(r.Name) > MaxRuleName {
+		add("name", "must be 1 to %d characters and not blank", MaxRuleName)
+	}
 	if !r.Algorithm.Valid() {
 		add("algorithm", "must be one of: %s, %s", AlgorithmTokenBucket, AlgorithmSlidingWindow)
 	}

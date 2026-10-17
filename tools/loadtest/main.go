@@ -56,18 +56,24 @@ func main() {
 	tenant := "load-" + hex.EncodeToString(suffix)
 
 	// A refill of 1 per hour means only the burst can be admitted during the run.
-	rule := map[string]any{"algorithm": *algorithm, "period": "1h"}
+	rule := map[string]any{"name": "loadtest " + tenant, "algorithm": *algorithm, "period": "1h"}
 	if *algorithm == "token_bucket" {
 		rule["limit"], rule["burst"] = 1, *burst
 	} else {
 		rule["limit"] = *burst
 	}
 	ruleID := createRule(client, urls[0], *jwt, rule)
-	assignment := fmt.Sprintf("%s/v1/assignments/%s/loadtest", urls[0], tenant)
-	if status, b := send(client, http.MethodPut, assignment, *jwt, map[string]any{"rule_id": ruleID}); status != http.StatusCreated {
+	status, b := send(client, http.MethodPost, urls[0]+"/v1/assignments", *jwt,
+		map[string]any{"tenant": tenant, "namespace": "loadtest", "rule_id": ruleID})
+	if status != http.StatusCreated {
 		send(client, http.MethodDelete, urls[0]+"/v1/rules/"+ruleID, *jwt, nil)
 		fail("assign rule: status %d: %s", status, b)
 	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(b, &created)
+	assignment := urls[0] + "/v1/assignments/" + created.ID
 	time.Sleep(500 * time.Millisecond) // let every instance's cache receive the change event
 
 	fmt.Printf("tenant=%s namespace=loadtest rule: %s burst=%d refill=1/h\n", tenant, *algorithm, *burst)

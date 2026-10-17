@@ -3,8 +3,6 @@ package rule
 import (
 	"context"
 	"net/http"
-	"strconv"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -44,7 +42,7 @@ func (ctl *Controller) Create(c *gin.Context) {
 		return
 	}
 	c.Header("Location", "/v1/rules/"+created.ID)
-	setETag(c, created.Version)
+	controllers.SetETag(c, created.Version)
 	c.JSON(http.StatusCreated, ruleschema.FromRule(created))
 }
 
@@ -63,22 +61,15 @@ func (ctl *Controller) Get(c *gin.Context) {
 		controllers.HandleError(c, err)
 		return
 	}
-	setETag(c, rule.Version)
+	controllers.SetETag(c, rule.Version)
 	c.JSON(http.StatusOK, ruleschema.FromRule(rule))
 }
 
 // Update requires If-Match with the current version (optimistic concurrency),
 // so two admins cannot silently overwrite each other.
 func (ctl *Controller) Update(c *gin.Context) {
-	ifMatch := c.GetHeader("If-Match")
-	if ifMatch == "" {
-		controllers.WriteProblem(c, http.StatusPreconditionRequired, "precondition-required", "If-Match header required",
-			`send If-Match with the rule's current ETag, e.g. If-Match: "3"`, nil)
-		return
-	}
-	expected, ok := parseETag(ifMatch)
+	expected, ok := controllers.IfMatch(c)
 	if !ok {
-		controllers.Validation(c, []types.FieldError{{Field: "If-Match", Message: `must be an ETag such as "3"`}})
 		return
 	}
 
@@ -97,7 +88,7 @@ func (ctl *Controller) Update(c *gin.Context) {
 		controllers.HandleError(c, err)
 		return
 	}
-	setETag(c, updated.Version)
+	controllers.SetETag(c, updated.Version)
 	c.JSON(http.StatusOK, ruleschema.FromRule(updated))
 }
 
@@ -107,15 +98,4 @@ func (ctl *Controller) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
-}
-
-func setETag(c *gin.Context, version int64) {
-	c.Header("ETag", strconv.Quote(strconv.FormatInt(version, 10)))
-}
-
-func parseETag(v string) (int64, bool) {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "W/")
-	v = strings.Trim(v, `"`)
-	n, err := strconv.ParseInt(v, 10, 64)
-	return n, err == nil && n > 0
 }

@@ -72,12 +72,14 @@ JWT=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vIn0.c2lnbmF0dXJl
 # Create a rule: 10 requests/second sustained, bursts of up to 20
 curl -s -X POST localhost:8080/v1/rules \
   -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
-  -d '{"algorithm":"token_bucket","limit":10,"period":"1s","burst":20}'
-# {"id":"r_01...","version":1,...}
+  -d '{"name":"orders standard","algorithm":"token_bucket","limit":10,"period":"1s","burst":20}'
+# {"id":"r_01...","name":"orders standard","version":1,...}
 
 # Assign it to acme in the orders namespace (use * as the tenant for a namespace default)
-curl -s -X PUT localhost:8080/v1/assignments/acme/orders \
-  -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"rule_id":"r_01..."}'
+curl -s -X POST localhost:8080/v1/assignments \
+  -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
+  -d '{"tenant":"acme","namespace":"orders","rule_id":"r_01..."}'
+# {"id":"a_01...","tenant":"acme","namespace":"orders","rule_id":"r_01...","version":1,...}
 
 # Ask for a decision
 curl -s -X POST localhost:8080/v1/check -H "Authorization: Bearer $JWT" -d '{"tenant":"acme","namespace":"orders"}'
@@ -110,8 +112,8 @@ make lint
 | `GET` | `/v1/quota/{tenant}/{namespace}` | JWT | Current quota without consuming |
 | `POST` `GET` | `/v1/rules` | JWT | Create, list rules |
 | `GET` `PUT` `DELETE` | `/v1/rules/{id}` | JWT | Read, replace (`If-Match` required), delete (`409` while assigned) |
-| `GET` | `/v1/assignments` | JWT | List assignments (`?tenant=&namespace=&rule_id=`) |
-| `PUT` `GET` `DELETE` | `/v1/assignments/{tenant}/{namespace}` | JWT | Assign a rule (`201` new, `200` replaced), read, remove |
+| `POST` `GET` | `/v1/assignments` | JWT | Assign a rule to a pair (`409` if the pair has one), list (`?tenant=&namespace=&rule_id=`) |
+| `GET` `PUT` `DELETE` | `/v1/assignments/{id}` | JWT | Read, replace (`If-Match` required), delete |
 | `POST` | `/v1/feedback` | JWT | Report downstream error rate → adaptive limit |
 | `GET` | `/v1/tenants/active` | JWT | Recently active tenants with quota (JSON) |
 | `GET` | `/dashboard` | none | Server-rendered HTML dashboard, auto-refreshes |
@@ -136,8 +138,8 @@ Design choices worth calling out:
   2 seconds. Metrics live on a
   separate port that is never exposed publicly. The OpenAPI spec is in the
   repo, not served.
-- **Optimistic concurrency** on rules: `ETag` on every read, `If-Match`
-  required on `PUT` (`428` if missing, `412` if stale).
+- **Optimistic concurrency** on rules and assignments: `ETag` on every read,
+  `If-Match` required on `PUT` (`428` if missing, `412` if stale).
 
 ### Rules and assignments
 
@@ -145,6 +147,7 @@ A rule is a reusable limit with no scope:
 
 ```jsonc
 {
+  "name": "orders strict",     // required label, not unique; the id identifies the rule
   "algorithm": "sliding_window",
   "limit": 100,                // sustained: 100 per period
   "period": "1m",
@@ -154,10 +157,12 @@ A rule is a reusable limit with no scope:
 }
 ```
 
-An assignment says which rule a `(tenant, namespace)` pair gets:
-`PUT /v1/assignments/acme/orders {"rule_id": "r_01..."}`. Each pair has at
-most one rule; one rule can be assigned to any number of pairs. Tenant `*`
-is the default for a namespace.
+An assignment says which rule a `(tenant, namespace)` pair gets. It is a
+resource with its own id (`a_...`) and version:
+`POST /v1/assignments {"tenant": "acme", "namespace": "orders", "rule_id": "r_01..."}`.
+Each pair has at most one assignment (`409` on a second); change it with
+`PUT /v1/assignments/{id}`. One rule can be assigned to any number of pairs.
+Tenant `*` is the default for a namespace.
 
 Lookup is the exact pair first, then the `*` default, then `DEFAULT_POLICY`.
 A shared or default rule gives **each pair its own quota** (the real tenant
@@ -214,8 +219,9 @@ The short version (full table in
 - **Clock skew:** instances never send time; Redis `TIME` is used.
 - **Rule propagation:** milliseconds via pub/sub; worst case bounded by the
   5 s reload. Worst-case over-admission during that window is one extra burst.
-- **Concurrent rule edits:** `UPDATE ... WHERE version = $n`; `412` for the
-  loser. Assignments are upserts on the pair's primary key.
+- **Concurrent edits:** `UPDATE ... WHERE version = $n`; `412` for the
+  loser. A unique `(tenant, namespace)` constraint means concurrent creates
+  for one pair produce exactly one assignment and `409` for the rest.
 - **Store slow or down:** 50 ms timeout, per-rule fail mode, `degraded:true`.
 
 ## Testing

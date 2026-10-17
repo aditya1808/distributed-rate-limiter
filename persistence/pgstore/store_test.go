@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -26,16 +27,20 @@ func newStore(t *testing.T) *pgstore.Store {
 
 func newRule(id string) types.Rule {
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	return types.Rule{ID: id, Algorithm: types.AlgorithmSlidingWindow, Limit: 100, Period: time.Minute,
+	return types.Rule{ID: id, Name: "rule " + id, Algorithm: types.AlgorithmSlidingWindow, Limit: 100, Period: time.Minute,
 		Burst: 10, BurstWindow: time.Second, FailOpen: true, Version: 1, CreatedAt: now, UpdatedAt: now}
 }
 
-func assign(t *testing.T, s *pgstore.Store, tenant, namespace, ruleID string) {
+func newAssignment(id, tenant, namespace, ruleID string) types.Assignment {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	return types.Assignment{ID: id, Version: 1, Tenant: tenant, Namespace: namespace, RuleID: ruleID, CreatedAt: now, UpdatedAt: now}
+}
+
+func assign(t *testing.T, s *pgstore.Store, tenant, namespace, ruleID string) string {
 	t.Helper()
-	_, _, err := s.PutAssignment(context.Background(), types.Assignment{
-		Tenant: tenant, Namespace: namespace, RuleID: ruleID, UpdatedAt: time.Now().UTC(),
-	})
-	require.NoError(t, err)
+	id := "a_" + tenant + "_" + namespace
+	require.NoError(t, s.CreateAssignment(context.Background(), newAssignment(id, tenant, namespace, ruleID)))
+	return id
 }
 
 func TestRules_CRUDRoundTripsEveryField(t *testing.T) {
@@ -97,62 +102,82 @@ func TestRules_CannotDeleteAssignedRule(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	require.NoError(t, s.CreateRule(ctx, newRule("r1")))
-	assign(t, s, "acme", "orders", "r1")
+	id := assign(t, s, "acme", "orders", "r1")
 
 	assert.ErrorIs(t, s.DeleteRule(ctx, "r1"), types.ErrRuleInUse)
-	require.NoError(t, s.DeleteAssignment(ctx, "acme", "orders"))
+	_, err := s.DeleteAssignment(ctx, id)
+	require.NoError(t, err)
 	assert.NoError(t, s.DeleteRule(ctx, "r1"))
 }
 
-func TestAssignments_PutCreatesThenReplaces(t *testing.T) {
+func TestAssignments_CRUDRoundTripsEveryField(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	require.NoError(t, s.CreateRule(ctx, newRule("r1")))
 	require.NoError(t, s.CreateRule(ctx, newRule("r2")))
 
-	first, created, err := s.PutAssignment(ctx, types.Assignment{Tenant: "acme", Namespace: "orders", RuleID: "r1", UpdatedAt: time.Now().UTC()})
+	a := newAssignment("a1", "acme", "orders", "r1")
+	require.NoError(t, s.CreateAssignment(ctx, a))
+	got, err := s.GetAssignment(ctx, "a1")
 	require.NoError(t, err)
-	assert.True(t, created)
+	assert.Equal(t, a, got)
 
-	second, created, err := s.PutAssignment(ctx, types.Assignment{Tenant: "acme", Namespace: "orders", RuleID: "r2", UpdatedAt: time.Now().UTC()})
+	a.Tenant, a.Namespace, a.RuleID, a.Version = "globex", "search", "r2", 2
+	require.NoError(t, s.UpdateAssignment(ctx, a, 1))
+	got, _ = s.GetAssignment(ctx, "a1")
+	assert.Equal(t, a, got)
+
+	assert.ErrorIs(t, s.UpdateAssignment(ctx, a, 1), types.ErrVersionMismatch)
+	assert.ErrorIs(t, s.UpdateAssignment(ctx, newAssignment("nope", "x", "y", "r1"), 1), types.ErrNotFound)
+
+	deleted, err := s.DeleteAssignment(ctx, "a1")
 	require.NoError(t, err)
-	assert.False(t, created, "a pair has exactly one assignment")
-	assert.Equal(t, first.CreatedAt, second.CreatedAt)
-
-	got, err := s.GetAssignment(ctx, "acme", "orders")
-	require.NoError(t, err)
-	assert.Equal(t, "r2", got.RuleID)
-
-	_, _, err = s.PutAssignment(ctx, types.Assignment{Tenant: "acme", Namespace: "search", RuleID: "missing", UpdatedAt: time.Now().UTC()})
-	assert.ErrorIs(t, err, types.ErrUnknownRule)
-
-	assert.ErrorIs(t, s.DeleteAssignment(ctx, "acme", "search"), types.ErrNotFound)
-	_, err = s.GetAssignment(ctx, "acme", "search")
+	assert.Equal(t, "search", deleted.Namespace, "delete returns the pair so callers can invalidate it")
+	_, err = s.DeleteAssignment(ctx, "a1")
+	assert.ErrorIs(t, err, types.ErrNotFound)
+	_, err = s.GetAssignment(ctx, "a1")
 	assert.ErrorIs(t, err, types.ErrNotFound)
 }
 
-func TestAssignments_ConcurrentPutsCreateOnce(t *testing.T) {
+func TestAssignments_ConstraintErrors(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.CreateRule(ctx, newRule("r1")))
+	assign(t, s, "acme", "orders", "r1")
+
+	assert.ErrorIs(t, s.CreateAssignment(ctx, newAssignment("a2", "acme", "orders", "r1")), types.ErrAssignmentExists)
+	assert.ErrorIs(t, s.CreateAssignment(ctx, newAssignment("a3", "acme", "search", "missing")), types.ErrUnknownRule)
+
+	moved := newAssignment("a4", "acme", "search", "r1")
+	require.NoError(t, s.CreateAssignment(ctx, moved))
+	moved.Namespace, moved.Version = "orders", 2
+	assert.ErrorIs(t, s.UpdateAssignment(ctx, moved, 1), types.ErrAssignmentExists)
+	moved.Namespace, moved.RuleID = "search", "missing"
+	assert.ErrorIs(t, s.UpdateAssignment(ctx, moved, 1), types.ErrUnknownRule)
+}
+
+func TestAssignments_ConcurrentCreatesForOnePairCreateOnce(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	require.NoError(t, s.CreateRule(ctx, newRule("r1")))
 
-	var created atomic.Int64
+	var created, exists atomic.Int64
 	var wg sync.WaitGroup
-	for range 20 {
+	for i := range 20 {
 		wg.Go(func() {
-			_, c, err := s.PutAssignment(ctx, types.Assignment{Tenant: "acme", Namespace: "orders", RuleID: "r1", UpdatedAt: time.Now().UTC()})
-			if err != nil {
-				t.Errorf("put: %v", err)
-			}
-			if c {
+			switch err := s.CreateAssignment(ctx, newAssignment("a"+strconv.Itoa(i), "acme", "orders", "r1")); {
+			case err == nil:
 				created.Add(1)
+			case errors.Is(err, types.ErrAssignmentExists):
+				exists.Add(1)
+			default:
+				t.Errorf("create: %v", err)
 			}
 		})
 	}
 	wg.Wait()
 	assert.EqualValues(t, 1, created.Load())
-	list, _ := s.ListAssignments(ctx, persistence.AssignmentFilter{})
-	assert.Len(t, list, 1)
+	assert.EqualValues(t, 19, exists.Load())
 }
 
 func TestAssignments_ListFilters(t *testing.T) {
@@ -224,7 +249,9 @@ func TestMigrate_IsIdempotentAndConcurrencySafe(t *testing.T) {
 		wg.Go(func() { assert.NoError(t, pgstore.Migrate(context.Background(), pool, log)) })
 	}
 	wg.Wait()
+	files, err := os.ReadDir("migrations")
+	require.NoError(t, err)
 	var n int
 	require.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM schema_migrations`).Scan(&n))
-	assert.Equal(t, 1, n)
+	assert.Equal(t, len(files), n)
 }

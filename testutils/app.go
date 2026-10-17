@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -175,10 +176,11 @@ func (a *TestApp) Caller(method, path string, body any) Response {
 
 // CreateRule creates a rule from the map's rule fields and returns it. If the
 // map also names a "namespace", the rule is assigned to ("tenant" or "*",
-// namespace). Fails the test on any non-success status.
+// namespace). A missing "name" defaults to "test rule". Fails the test on any
+// non-success status.
 func (a *TestApp) CreateRule(fields map[string]any) map[string]any {
 	a.tb.Helper()
-	body := map[string]any{}
+	body := map[string]any{"name": "test rule"}
 	for k, v := range fields {
 		body[k] = v
 	}
@@ -201,14 +203,26 @@ func (a *TestApp) CreateRule(fields map[string]any) map[string]any {
 	return rule
 }
 
-// Assign binds a rule to a pair and fails the test unless it returns 200 or 201.
+// Assign creates an assignment and returns it; fails the test unless 201.
 func (a *TestApp) Assign(tenant, namespace, ruleID string) map[string]any {
 	a.tb.Helper()
-	resp := a.Caller(http.MethodPut, "/v1/assignments/"+tenant+"/"+namespace, map[string]any{"rule_id": ruleID})
-	if resp.Status != http.StatusCreated && resp.Status != http.StatusOK {
+	resp := a.Caller(http.MethodPost, "/v1/assignments",
+		map[string]any{"tenant": tenant, "namespace": namespace, "rule_id": ruleID})
+	if resp.Status != http.StatusCreated {
 		a.tb.Fatalf("assign rule: status %d body %s", resp.Status, resp.Body)
 	}
 	return resp.Map(a.tb)
+}
+
+// AssignmentFor returns the assignment of a pair; fails the test if none.
+func (a *TestApp) AssignmentFor(tenant, namespace string) map[string]any {
+	a.tb.Helper()
+	q := url.Values{"tenant": {tenant}, "namespace": {namespace}}
+	items, _ := a.Caller(http.MethodGet, "/v1/assignments?"+q.Encode(), nil).Map(a.tb)["items"].([]any)
+	if len(items) != 1 {
+		a.tb.Fatalf("assignment for %s/%s: found %d", tenant, namespace, len(items))
+	}
+	return items[0].(map[string]any)
 }
 
 func (a *TestApp) Check(tenant, namespace string, cost int) map[string]any {

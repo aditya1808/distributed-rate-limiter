@@ -14,6 +14,7 @@ type QuotaURI struct {
 
 type QuotaRule struct {
 	ID          string `json:"id"`
+	Name        string `json:"name"`
 	Algorithm   string `json:"algorithm"`
 	Limit       int64  `json:"limit"`
 	Period      string `json:"period"`
@@ -39,6 +40,7 @@ type QuotaResponseBody struct {
 func FromQuota(q types.Quota) QuotaResponseBody {
 	qr := QuotaRule{
 		ID:        q.Rule.ID,
+		Name:      q.Rule.Name,
 		Algorithm: string(q.Rule.Algorithm),
 		Limit:     q.Rule.Limit,
 		Period:    rule.FormatDuration(q.Rule.Period),

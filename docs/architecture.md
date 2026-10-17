@@ -133,8 +133,10 @@ sequenceDiagram
     Note over I2: if the message is lost (reconnect), the 5s periodic reload converges
 ```
 
-Assignment writes (`PUT` / `DELETE /v1/assignments/{tenant}/{namespace}`)
-follow the same path and also delete that pair's Redis resolution entry.
+Assignment writes (`POST /v1/assignments`, `PUT` / `DELETE
+/v1/assignments/{id}`) follow the same path and also delete the Redis
+resolution entry of every pair they touch (both pairs when an update moves an
+assignment).
 The Postgres commit and the `PUBLISH` are not atomic; if the publish is lost,
 the periodic reload converges.
 
@@ -150,8 +152,31 @@ Postgres (schema managed by embedded, append-only migrations in
 
 | Table | Key | Columns |
 |---|---|---|
-| `rules` | `id` | `algorithm`, `limit_count`, `period_ms`, `burst`, `burst_window_ms`, `fail_open`, `version`, timestamps |
-| `assignments` | `(tenant, namespace)` | `rule_id` → `rules.id` (`ON DELETE RESTRICT`, so an assigned rule cannot be deleted), timestamps |
+| `rules` | `id` (`r_<ulid>`) | `name`, `algorithm`, `limit_count`, `period_ms`, `burst`, `burst_window_ms`, `fail_open`, `version`, timestamps |
+| `assignments` | `id` (`a_<ulid>`), unique `(tenant, namespace)` | `rule_id` → `rules.id` (`ON DELETE RESTRICT`, so an assigned rule cannot be deleted), `version`, timestamps |
+
+```mermaid
+erDiagram
+    rules ||--o{ assignments : "assigned via"
+    rules {
+        text id PK
+        text name
+        text algorithm
+        bigint limit_count
+        bigint period_ms
+        bigint burst
+        bigint burst_window_ms
+        boolean fail_open
+        bigint version
+    }
+    assignments {
+        text id PK
+        text tenant "unique with namespace; * = default"
+        text namespace
+        text rule_id FK
+        bigint version
+    }
+```
 
 Redis:
 
@@ -175,7 +200,7 @@ so the same scripts run unchanged on Redis Cluster.
 | Two instances check the same key at the same instant | Each decision is one Lua script; Redis executes scripts one at a time, so read-decide-write cannot interleave. Proven by tests: 500 concurrent requests against a burst of 50 admit exactly 50 (a naive GET-then-SET limiter admits all 500). |
 | Instance clocks disagree | No instance clock is used. Scripts read `TIME` from Redis, the single clock for every decision. A clock moving backwards after failover is clamped (no negative refill). |
 | Rule update reaches instances at different times | Pub/sub delivers in milliseconds; a lost message is repaired by the periodic reload (`RULE_REFRESH_INTERVAL`, default 5 s). During that window an instance can enforce the previous version, so worst case is old burst + new burst admitted once. |
-| Concurrent rule writes | Update is `UPDATE ... WHERE id = $1 AND version = $2` (optimistic concurrency, `If-Match`/`ETag`, 412 on mismatch, 428 if missing). Assignments are an upsert on the `(tenant, namespace)` primary key, so concurrent puts never create duplicates. Deleting an assigned rule is refused by the foreign key (409). |
+| Concurrent rule writes | Update is `UPDATE ... WHERE id = $1 AND version = $2` (optimistic concurrency, `If-Match`/`ETag`, 412 on mismatch, 428 if missing). Assignments use the same versioning, and a unique `(tenant, namespace)` constraint makes concurrent creates for one pair yield exactly one assignment (409 for the rest). Deleting an assigned rule is refused by the foreign key (409). |
 | Cache update races (pub/sub vs reload vs local write) | Every trigger does the same full reload; reloads are serialized and the query runs inside the lock, so a later reload always sees later data. Snapshots are immutable and swapped with an atomic pointer. |
 | Snapshot miss storms | The miss path runs only when neither the exact pair nor the `*` default is in the snapshot. Concurrent misses for one pair share one lookup (singleflight); the answer, including "no rule" and lookup failures, is cached locally and in Redis for `RULE_MISS_TTL`. A reload clears the local miss cache. |
 | Postgres down | Not on the check path: the in-memory snapshot keeps serving, and readiness does not depend on Postgres. Rule and assignment writes fail; a miss whose Redis entry has expired resolves to "no rule". |

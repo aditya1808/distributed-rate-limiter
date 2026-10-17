@@ -20,11 +20,14 @@ can have different rules.
 
 ## Decision
 
-- **Rules are a separate entity** with no scope: algorithm, limit, period,
-  burst, burst window, fail mode, version.
+- **Rules are a separate entity** with no scope: a required display name
+  (not unique), algorithm, limit, period, burst, burst window, fail mode,
+  version.
 - **Assignments** bind `(tenant, namespace)` to a rule. Tenant `*` is the
-  namespace default. The pair is the primary key, so each pair has at most
-  one rule; one rule can serve any number of pairs.
+  namespace default. Each assignment is a resource with its own id and
+  version, so a UI or audit log can reference it, and it can be updated with
+  `If-Match` like a rule. A unique constraint on the pair keeps one
+  assignment per pair; one rule can serve any number of pairs.
 - Both live in **Postgres**. The foreign key is `ON DELETE RESTRICT`, so a
   rule that is still assigned cannot be deleted (409 `rule-in-use`). Schema
   changes are embedded, append-only SQL migrations applied at startup under

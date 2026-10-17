@@ -170,10 +170,35 @@ paths:
         '503': { $ref: '#/components/responses/Unavailable' }
 
   /v1/assignments:
+    post:
+      tags: [Assignments]
+      operationId: createAssignment
+      summary: Assign a rule to a (tenant, namespace) pair
+      description: A pair has at most one assignment; creating a second returns 409. Update the existing one instead.
+      security: [{ jwtAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignmentRequest' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location: { schema: { type: string } }
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/AssignmentExists' }
+        '503': { $ref: '#/components/responses/Unavailable' }
     get:
       tags: [Assignments]
       operationId: listAssignments
       summary: List assignments
+      description: All filters are optional and combine with AND. tenant + namespace finds the assignment of one pair.
       security: [{ jwtAuth: [] }]
       parameters:
         - name: tenant
@@ -195,61 +220,67 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/Unavailable' }
 
-  /v1/assignments/{tenant}/{namespace}:
+  /v1/assignments/{id}:
     parameters:
-      - name: tenant
+      - name: id
         in: path
         required: true
-        description: Tenant, or "*" for the namespace default.
-        schema: { $ref: '#/components/schemas/TenantSelector' }
-      - $ref: '#/components/parameters/Namespace'
-    put:
-      tags: [Assignments]
-      operationId: putAssignment
-      summary: Assign a rule to a pair (creates or replaces)
-      security: [{ jwtAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/AssignmentPutRequest' }
-      responses:
-        '200':
-          description: Replaced
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Assignment' }
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Assignment' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '503': { $ref: '#/components/responses/Unavailable' }
+        schema: { type: string }
     get:
       tags: [Assignments]
       operationId: getAssignment
-      summary: Get the assignment for a pair
+      summary: Get an assignment
       security: [{ jwtAuth: [] }]
       responses:
         '200':
           description: Assignment
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    put:
+      tags: [Assignments]
+      operationId: updateAssignment
+      summary: Replace an assignment (optimistic concurrency via If-Match)
+      description: Can change the rule, the pair, or both. Moving onto a pair that already has an assignment returns 409.
+      security: [{ jwtAuth: [] }]
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          description: Current ETag of the assignment. Required; omitting it returns 428.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignmentRequest' }
+      responses:
+        '200':
+          description: Updated
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Assignment' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/AssignmentExists' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
         '503': { $ref: '#/components/responses/Unavailable' }
     delete:
       tags: [Assignments]
       operationId: deleteAssignment
-      summary: Remove the assignment for a pair
+      summary: Delete an assignment
       security: [{ jwtAuth: [] }]
       responses:
         '204': { description: Deleted }
-        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/Unavailable' }
@@ -364,7 +395,7 @@ components:
 
   headers:
     ETag:
-      description: Rule version, quoted (e.g. "3"). Send it back as If-Match.
+      description: Resource version, quoted (e.g. "3"). Send it back as If-Match.
       schema: { type: string }
 
   responses:
@@ -385,6 +416,11 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     RuleInUse:
       description: The rule is still assigned to at least one pair
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    AssignmentExists:
+      description: The (tenant, namespace) pair already has an assignment
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -463,9 +499,10 @@ components:
         namespace: { type: string }
         rule:
           type: object
-          required: [id, algorithm, limit, period, burst, version, matched]
+          required: [id, name, algorithm, limit, period, burst, version, matched]
           properties:
             id: { type: string }
+            name: { type: string }
             algorithm: { $ref: '#/components/schemas/Algorithm' }
             limit: { type: integer }
             period: { $ref: '#/components/schemas/Duration' }
@@ -482,8 +519,13 @@ components:
     RuleCreateRequest:
       type: object
       additionalProperties: false
-      required: [algorithm, limit, period]
+      required: [name, algorithm, limit, period]
       properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Human-readable label. Not unique; the id identifies the rule.
         algorithm: { $ref: '#/components/schemas/Algorithm' }
         limit:
           type: integer
@@ -507,9 +549,10 @@ components:
 
     Rule:
       type: object
-      required: [id, algorithm, limit, period, burst, fail_open, version, created_at, updated_at]
+      required: [id, name, algorithm, limit, period, burst, fail_open, version, created_at, updated_at]
       properties:
         id: { type: string }
+        name: { type: string }
         algorithm: { $ref: '#/components/schemas/Algorithm' }
         limit: { type: integer }
         period: { $ref: '#/components/schemas/Duration' }
@@ -529,20 +572,26 @@ components:
           items: { $ref: '#/components/schemas/Rule' }
         count: { type: integer }
 
-    AssignmentPutRequest:
+    AssignmentRequest:
       type: object
       additionalProperties: false
-      required: [rule_id]
+      required: [tenant, namespace, rule_id]
       properties:
+        tenant:
+          allOf: [{ $ref: '#/components/schemas/TenantSelector' }]
+          description: Tenant, or "*" for the namespace default.
+        namespace: { $ref: '#/components/schemas/Identifier' }
         rule_id: { type: string }
 
     Assignment:
       type: object
-      required: [tenant, namespace, rule_id, created_at, updated_at]
+      required: [id, tenant, namespace, rule_id, version, created_at, updated_at]
       properties:
+        id: { type: string, example: a_01j9z3k6m2q8r4t7v0w5x1y3z6 }
         tenant: { $ref: '#/components/schemas/TenantSelector' }
         namespace: { $ref: '#/components/schemas/Identifier' }
         rule_id: { type: string }
+        version: { type: integer, minimum: 1 }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 

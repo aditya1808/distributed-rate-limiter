@@ -6,14 +6,16 @@ import (
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
-type AssignmentURI struct {
-	// Tenant "*" is the namespace default.
-	Tenant    string `uri:"tenant" binding:"required,tenant_selector"`
-	Namespace string `uri:"namespace" binding:"required,identifier"`
+// AssignmentRequestBody is the full assignment for POST and PUT. Tenant "*"
+// is the namespace default.
+type AssignmentRequestBody struct {
+	Tenant    string `json:"tenant" binding:"required,tenant_selector"`
+	Namespace string `json:"namespace" binding:"required,identifier"`
+	RuleID    string `json:"rule_id" binding:"required"`
 }
 
-type AssignmentPutRequestBody struct {
-	RuleID string `json:"rule_id" binding:"required"`
+func (b AssignmentRequestBody) ToAssignment() types.Assignment {
+	return types.Assignment{Tenant: b.Tenant, Namespace: b.Namespace, RuleID: b.RuleID}
 }
 
 type AssignmentListQuery struct {
@@ -23,9 +25,11 @@ type AssignmentListQuery struct {
 }
 
 type AssignmentResponseBody struct {
+	ID        string    `json:"id"`
 	Tenant    string    `json:"tenant"`
 	Namespace string    `json:"namespace"`
 	RuleID    string    `json:"rule_id"`
+	Version   int64     `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -37,9 +41,11 @@ type AssignmentListResponseBody struct {
 
 func FromAssignment(a types.Assignment) AssignmentResponseBody {
 	return AssignmentResponseBody{
+		ID:        a.ID,
 		Tenant:    a.Tenant,
 		Namespace: a.Namespace,
 		RuleID:    a.RuleID,
+		Version:   a.Version,
 		CreatedAt: a.CreatedAt.UTC(),
 		UpdatedAt: a.UpdatedAt.UTC(),
 	}

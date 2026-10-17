@@ -13,9 +13,10 @@ import (
 )
 
 type Manager interface {
-	Assign(ctx context.Context, a types.Assignment) (types.Assignment, bool, error)
-	Unassign(ctx context.Context, tenant, namespace string) error
-	GetAssignment(ctx context.Context, tenant, namespace string) (types.Assignment, error)
+	CreateAssignment(ctx context.Context, a types.Assignment) (types.Assignment, error)
+	UpdateAssignment(ctx context.Context, id string, a types.Assignment, expectedVersion int64) (types.Assignment, error)
+	DeleteAssignment(ctx context.Context, id string) error
+	GetAssignment(ctx context.Context, id string) (types.Assignment, error)
 	ListAssignments(ctx context.Context, f persistence.AssignmentFilter) ([]types.Assignment, error)
 }
 
@@ -25,58 +26,22 @@ type Controller struct {
 
 func NewController(m Manager) *Controller { return &Controller{mgr: m} }
 
-// Put handles PUT /v1/assignments/:tenant/:namespace. It is idempotent:
-// 201 when the pair had no assignment, 200 when one was replaced.
-func (ctl *Controller) Put(c *gin.Context) {
-	var uri assignmentschema.AssignmentURI
-	if err := c.ShouldBindUri(&uri); err != nil {
-		controllers.BindError(c, err)
-		return
-	}
-	var body assignmentschema.AssignmentPutRequestBody
+// Create handles POST /v1/assignments. A pair that already has an
+// assignment gets 409; the client updates that assignment instead.
+func (ctl *Controller) Create(c *gin.Context) {
+	var body assignmentschema.AssignmentRequestBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		controllers.BindError(c, err)
 		return
 	}
-	saved, created, err := ctl.mgr.Assign(c.Request.Context(), types.Assignment{
-		Tenant: uri.Tenant, Namespace: uri.Namespace, RuleID: body.RuleID,
-	})
+	created, err := ctl.mgr.CreateAssignment(c.Request.Context(), body.ToAssignment())
 	if err != nil {
 		controllers.HandleError(c, err)
 		return
 	}
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
-	}
-	c.JSON(status, assignmentschema.FromAssignment(saved))
-}
-
-func (ctl *Controller) Get(c *gin.Context) {
-	var uri assignmentschema.AssignmentURI
-	if err := c.ShouldBindUri(&uri); err != nil {
-		controllers.BindError(c, err)
-		return
-	}
-	a, err := ctl.mgr.GetAssignment(c.Request.Context(), uri.Tenant, uri.Namespace)
-	if err != nil {
-		controllers.HandleError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, assignmentschema.FromAssignment(a))
-}
-
-func (ctl *Controller) Delete(c *gin.Context) {
-	var uri assignmentschema.AssignmentURI
-	if err := c.ShouldBindUri(&uri); err != nil {
-		controllers.BindError(c, err)
-		return
-	}
-	if err := ctl.mgr.Unassign(c.Request.Context(), uri.Tenant, uri.Namespace); err != nil {
-		controllers.HandleError(c, err)
-		return
-	}
-	c.Status(http.StatusNoContent)
+	c.Header("Location", "/v1/assignments/"+created.ID)
+	controllers.SetETag(c, created.Version)
+	c.JSON(http.StatusCreated, assignmentschema.FromAssignment(created))
 }
 
 func (ctl *Controller) List(c *gin.Context) {
@@ -93,4 +58,43 @@ func (ctl *Controller) List(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, assignmentschema.FromAssignments(as))
+}
+
+func (ctl *Controller) Get(c *gin.Context) {
+	a, err := ctl.mgr.GetAssignment(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		controllers.HandleError(c, err)
+		return
+	}
+	controllers.SetETag(c, a.Version)
+	c.JSON(http.StatusOK, assignmentschema.FromAssignment(a))
+}
+
+// Update replaces the assignment and requires If-Match with its current
+// version.
+func (ctl *Controller) Update(c *gin.Context) {
+	expected, ok := controllers.IfMatch(c)
+	if !ok {
+		return
+	}
+	var body assignmentschema.AssignmentRequestBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		controllers.BindError(c, err)
+		return
+	}
+	updated, err := ctl.mgr.UpdateAssignment(c.Request.Context(), c.Param("id"), body.ToAssignment(), expected)
+	if err != nil {
+		controllers.HandleError(c, err)
+		return
+	}
+	controllers.SetETag(c, updated.Version)
+	c.JSON(http.StatusOK, assignmentschema.FromAssignment(updated))
+}
+
+func (ctl *Controller) Delete(c *gin.Context) {
+	if err := ctl.mgr.DeleteAssignment(c.Request.Context(), c.Param("id")); err != nil {
+		controllers.HandleError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

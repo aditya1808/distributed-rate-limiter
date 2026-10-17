@@ -19,9 +19,14 @@ import (
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
-const pgForeignKeyViolation = "23503"
+const (
+	pgForeignKeyViolation = "23503"
+	pgUniqueViolation     = "23505"
+)
 
-const ruleColumns = `r.id, r.algorithm, r.limit_count, r.period_ms, r.burst, r.burst_window_ms, r.fail_open, r.version, r.created_at, r.updated_at`
+const assignmentColumns = `id, version, tenant, namespace, rule_id, created_at, updated_at`
+
+const ruleColumns = `r.id, r.name, r.algorithm, r.limit_count, r.period_ms, r.burst, r.burst_window_ms, r.fail_open, r.version, r.created_at, r.updated_at`
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -33,10 +38,10 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func (s *Store) CreateRule(ctx context.Context, r types.Rule) error {
 	_, err := s.pool.Exec(ctx, `INSERT INTO rules
-		(id, algorithm, limit_count, period_ms, burst, burst_window_ms, fail_open, version, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		(id, name, algorithm, limit_count, period_ms, burst, burst_window_ms, fail_open, version, created_at, updated_at)
+		VALUES ($1, $11, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		r.ID, r.Algorithm, r.Limit, r.Period.Milliseconds(), r.Burst, r.BurstWindow.Milliseconds(),
-		r.FailOpen, r.Version, r.CreatedAt, r.UpdatedAt)
+		r.FailOpen, r.Version, r.CreatedAt, r.UpdatedAt, r.Name)
 	if err != nil {
 		return fmt.Errorf("create rule: %w", err)
 	}
@@ -46,10 +51,10 @@ func (s *Store) CreateRule(ctx context.Context, r types.Rule) error {
 func (s *Store) UpdateRule(ctx context.Context, r types.Rule, expectedVersion int64) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE rules SET
 		algorithm = $3, limit_count = $4, period_ms = $5, burst = $6, burst_window_ms = $7,
-		fail_open = $8, version = $9, updated_at = $10
+		fail_open = $8, version = $9, updated_at = $10, name = $11
 		WHERE id = $1 AND version = $2`,
 		r.ID, expectedVersion, r.Algorithm, r.Limit, r.Period.Milliseconds(), r.Burst,
-		r.BurstWindow.Milliseconds(), r.FailOpen, r.Version, r.UpdatedAt)
+		r.BurstWindow.Milliseconds(), r.FailOpen, r.Version, r.UpdatedAt, r.Name)
 	if err != nil {
 		return fmt.Errorf("update rule: %w", err)
 	}
@@ -97,36 +102,48 @@ func (s *Store) ListRules(ctx context.Context) ([]types.Rule, error) {
 	return rules, nil
 }
 
-func (s *Store) PutAssignment(ctx context.Context, a types.Assignment) (types.Assignment, bool, error) {
-	var created bool
-	err := s.pool.QueryRow(ctx, `INSERT INTO assignments (tenant, namespace, rule_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $4)
-		ON CONFLICT (tenant, namespace) DO UPDATE SET rule_id = EXCLUDED.rule_id, updated_at = EXCLUDED.updated_at
-		RETURNING created_at, updated_at, (xmax = 0)`,
-		a.Tenant, a.Namespace, a.RuleID, a.UpdatedAt).Scan(&a.CreatedAt, &a.UpdatedAt, &created)
-	if isForeignKeyViolation(err) {
-		return types.Assignment{}, false, types.ErrUnknownRule
-	}
-	if err != nil {
-		return types.Assignment{}, false, fmt.Errorf("put assignment: %w", err)
-	}
-	return a, created, nil
-}
-
-func (s *Store) DeleteAssignment(ctx context.Context, tenant, namespace string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM assignments WHERE tenant = $1 AND namespace = $2`, tenant, namespace)
-	if err != nil {
-		return fmt.Errorf("delete assignment: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return types.ErrNotFound
+func (s *Store) CreateAssignment(ctx context.Context, a types.Assignment) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO assignments
+		(id, version, tenant, namespace, rule_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		a.ID, a.Version, a.Tenant, a.Namespace, a.RuleID, a.CreatedAt, a.UpdatedAt)
+	if err := assignmentWriteError(err); err != nil {
+		return fmt.Errorf("create assignment: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) GetAssignment(ctx context.Context, tenant, namespace string) (types.Assignment, error) {
-	rows, _ := s.pool.Query(ctx, `SELECT tenant, namespace, rule_id, created_at, updated_at
-		FROM assignments WHERE tenant = $1 AND namespace = $2`, tenant, namespace)
+func (s *Store) UpdateAssignment(ctx context.Context, a types.Assignment, expectedVersion int64) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE assignments SET
+		tenant = $3, namespace = $4, rule_id = $5, version = $6, updated_at = $7
+		WHERE id = $1 AND version = $2`,
+		a.ID, expectedVersion, a.Tenant, a.Namespace, a.RuleID, a.Version, a.UpdatedAt)
+	if err := assignmentWriteError(err); err != nil {
+		return fmt.Errorf("update assignment: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	if _, err := s.GetAssignment(ctx, a.ID); err != nil {
+		return err
+	}
+	return types.ErrVersionMismatch
+}
+
+func (s *Store) DeleteAssignment(ctx context.Context, id string) (types.Assignment, error) {
+	rows, _ := s.pool.Query(ctx, `DELETE FROM assignments WHERE id = $1 RETURNING `+assignmentColumns, id)
+	a, err := pgx.CollectExactlyOneRow(rows, scanAssignment)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return types.Assignment{}, types.ErrNotFound
+	}
+	if err != nil {
+		return types.Assignment{}, fmt.Errorf("delete assignment: %w", err)
+	}
+	return a, nil
+}
+
+func (s *Store) GetAssignment(ctx context.Context, id string) (types.Assignment, error) {
+	rows, _ := s.pool.Query(ctx, `SELECT `+assignmentColumns+` FROM assignments WHERE id = $1`, id)
 	a, err := pgx.CollectExactlyOneRow(rows, scanAssignment)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return types.Assignment{}, types.ErrNotFound
@@ -148,7 +165,7 @@ func (s *Store) ListAssignments(ctx context.Context, f persistence.AssignmentFil
 			where = append(where, col+" = $"+strconv.Itoa(len(args)))
 		}
 	}
-	q := `SELECT tenant, namespace, rule_id, created_at, updated_at FROM assignments`
+	q := `SELECT ` + assignmentColumns + ` FROM assignments`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -207,7 +224,7 @@ func scanRule(row pgx.CollectableRow) (types.Rule, error) {
 // scanRuleInto scans optional leading columns (prefix) followed by ruleColumns.
 func scanRuleInto(row pgx.CollectableRow, r *types.Rule, prefix ...any) error {
 	var periodMs, burstWindowMs int64
-	dest := append(prefix, &r.ID, &r.Algorithm, &r.Limit, &periodMs, &r.Burst, &burstWindowMs,
+	dest := append(prefix, &r.ID, &r.Name, &r.Algorithm, &r.Limit, &periodMs, &r.Burst, &burstWindowMs,
 		&r.FailOpen, &r.Version, &r.CreatedAt, &r.UpdatedAt)
 	if err := row.Scan(dest...); err != nil {
 		return err
@@ -220,12 +237,26 @@ func scanRuleInto(row pgx.CollectableRow, r *types.Rule, prefix ...any) error {
 
 func scanAssignment(row pgx.CollectableRow) (types.Assignment, error) {
 	var a types.Assignment
-	err := row.Scan(&a.Tenant, &a.Namespace, &a.RuleID, &a.CreatedAt, &a.UpdatedAt)
+	err := row.Scan(&a.ID, &a.Version, &a.Tenant, &a.Namespace, &a.RuleID, &a.CreatedAt, &a.UpdatedAt)
 	a.CreatedAt, a.UpdatedAt = a.CreatedAt.UTC(), a.UpdatedAt.UTC()
 	return a, err
 }
 
-func isForeignKeyViolation(err error) bool {
+func assignmentWriteError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case isViolation(err, pgForeignKeyViolation):
+		return types.ErrUnknownRule
+	case isViolation(err, pgUniqueViolation):
+		return types.ErrAssignmentExists
+	}
+	return err
+}
+
+func isForeignKeyViolation(err error) bool { return isViolation(err, pgForeignKeyViolation) }
+
+func isViolation(err error, code string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation
+	return errors.As(err, &pgErr) && pgErr.Code == code
 }

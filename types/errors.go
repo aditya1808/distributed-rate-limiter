@@ -15,6 +15,9 @@ var (
 	ErrRuleInUse = errors.New("rule is assigned")
 	// ErrUnknownRule means an assignment names a rule that does not exist.
 	ErrUnknownRule = errors.New("rule does not exist")
+	// ErrAssignmentExists means the (tenant, namespace) pair already has an
+	// assignment; update that one instead.
+	ErrAssignmentExists = errors.New("assignment exists for tenant and namespace")
 )
 
 type FieldError struct {
