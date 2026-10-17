@@ -19,7 +19,7 @@ import (
 
 type fakeResolver map[string]types.Rule
 
-func (f fakeResolver) Resolve(tenant, ns string) (types.Rule, types.MatchKind, bool) {
+func (f fakeResolver) Resolve(_ context.Context, tenant, ns string) (types.Rule, types.MatchKind, bool) {
 	if r, ok := f[constants.PairKey(tenant, ns)]; ok {
 		return r, types.MatchTenant, true
 	}
@@ -51,7 +51,7 @@ func newEvaluator(rules fakeResolver, lim limiter.Limiter, defaultAllow bool) (*
 		EvaluatorConfig{DefaultAllow: defaultAllow, StoreTimeout: 50 * time.Millisecond}), act
 }
 
-var defaultRule = types.Rule{ID: "r1", Tenant: "*", Namespace: "orders", Algorithm: types.AlgorithmTokenBucket,
+var defaultRule = types.Rule{ID: "r1", Algorithm: types.AlgorithmTokenBucket,
 	Limit: 10, Period: time.Second, Burst: 5, Version: 3}
 
 func TestEvaluate_DefaultRuleGivesEachTenantItsOwnKey(t *testing.T) {

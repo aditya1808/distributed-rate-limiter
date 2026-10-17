@@ -3,19 +3,25 @@ info:
   title: Distributed Rate Limiter
   version: 1.0.0
   description: |
-    Horizontally scalable rate limiting decision service. Instances share state in
-    Redis/Valkey; every decision is a single atomic Lua script, so results are correct
-    no matter which instance serves a request.
+    Horizontally scalable rate limiting decision service. Rules and assignments live in
+    PostgreSQL; quota state lives in Redis/Valkey, and every decision is a single atomic
+    Lua script, so results are correct no matter which instance serves a request.
 
     `POST /v1/check` returns 200 for both allowed and denied decisions. A denial is a
     valid answer; translating it to `429 Too Many Requests` (with `Retry-After`) is the
     calling gateway's responsibility.
+
+    Rules are reusable quota definitions with no scope of their own. An assignment
+    binds a rule to a (tenant, namespace) pair; tenant "*" makes it the default for
+    every tenant in that namespace. One rule can be assigned to many pairs; each pair
+    still has its own quota.
 servers:
   - url: http://localhost:8080
     description: Local
 tags:
   - name: Decisions
   - name: Rules
+  - name: Assignments
   - name: Adaptive
   - name: Dashboard
   - name: Health
@@ -84,20 +90,12 @@ paths:
               schema: { $ref: '#/components/schemas/Rule' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '409': { $ref: '#/components/responses/Conflict' }
         '503': { $ref: '#/components/responses/Unavailable' }
     get:
       tags: [Rules]
       operationId: listRules
       summary: List rules
       security: [{ jwtAuth: [] }]
-      parameters:
-        - name: tenant
-          in: query
-          schema: { type: string }
-        - name: namespace
-          in: query
-          schema: { type: string }
       responses:
         '200':
           description: Rules
@@ -166,6 +164,92 @@ paths:
       security: [{ jwtAuth: [] }]
       responses:
         '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RuleInUse' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/assignments:
+    get:
+      tags: [Assignments]
+      operationId: listAssignments
+      summary: List assignments
+      security: [{ jwtAuth: [] }]
+      parameters:
+        - name: tenant
+          in: query
+          schema: { $ref: '#/components/schemas/TenantSelector' }
+        - name: namespace
+          in: query
+          schema: { $ref: '#/components/schemas/Identifier' }
+        - name: rule_id
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Assignments
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssignmentList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/assignments/{tenant}/{namespace}:
+    parameters:
+      - name: tenant
+        in: path
+        required: true
+        description: Tenant, or "*" for the namespace default.
+        schema: { $ref: '#/components/schemas/TenantSelector' }
+      - $ref: '#/components/parameters/Namespace'
+    put:
+      tags: [Assignments]
+      operationId: putAssignment
+      summary: Assign a rule to a pair (creates or replaces)
+      security: [{ jwtAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignmentPutRequest' }
+      responses:
+        '200':
+          description: Replaced
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      tags: [Assignments]
+      operationId: getAssignment
+      summary: Get the assignment for a pair
+      security: [{ jwtAuth: [] }]
+      responses:
+        '200':
+          description: Assignment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    delete:
+      tags: [Assignments]
+      operationId: deleteAssignment
+      summary: Remove the assignment for a pair
+      security: [{ jwtAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/Unavailable' }
@@ -299,8 +383,8 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
-    Conflict:
-      description: A rule already exists for this tenant and namespace
+    RuleInUse:
+      description: The rule is still assigned to at least one pair
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -331,7 +415,7 @@ components:
       pattern: '^[a-zA-Z0-9_.-]{1,64}$'
     TenantSelector:
       type: string
-      description: A tenant identifier, or "*" for the namespace-wide default rule.
+      description: A tenant identifier, or "*" for the namespace-wide default assignment.
       pattern: '^(\*|[a-zA-Z0-9_.-]{1,64})$'
     Algorithm:
       type: string
@@ -397,12 +481,9 @@ components:
 
     RuleCreateRequest:
       type: object
-      required: [namespace, algorithm, limit, period]
+      additionalProperties: false
+      required: [algorithm, limit, period]
       properties:
-        tenant:
-          allOf: [{ $ref: '#/components/schemas/TenantSelector' }]
-          default: '*'
-        namespace: { $ref: '#/components/schemas/Identifier' }
         algorithm: { $ref: '#/components/schemas/Algorithm' }
         limit:
           type: integer
@@ -422,18 +503,13 @@ components:
           description: Decision when the state store is unavailable.
 
     RuleUpdateRequest:
-      allOf:
-        - $ref: '#/components/schemas/RuleCreateRequest'
-        - type: object
-          required: [tenant]
+      $ref: '#/components/schemas/RuleCreateRequest'
 
     Rule:
       type: object
-      required: [id, tenant, namespace, algorithm, limit, period, burst, fail_open, version, created_at, updated_at]
+      required: [id, algorithm, limit, period, burst, fail_open, version, created_at, updated_at]
       properties:
         id: { type: string }
-        tenant: { $ref: '#/components/schemas/TenantSelector' }
-        namespace: { $ref: '#/components/schemas/Identifier' }
         algorithm: { $ref: '#/components/schemas/Algorithm' }
         limit: { type: integer }
         period: { $ref: '#/components/schemas/Duration' }
@@ -451,6 +527,32 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/Rule' }
+        count: { type: integer }
+
+    AssignmentPutRequest:
+      type: object
+      additionalProperties: false
+      required: [rule_id]
+      properties:
+        rule_id: { type: string }
+
+    Assignment:
+      type: object
+      required: [tenant, namespace, rule_id, created_at, updated_at]
+      properties:
+        tenant: { $ref: '#/components/schemas/TenantSelector' }
+        namespace: { $ref: '#/components/schemas/Identifier' }
+        rule_id: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    AssignmentList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Assignment' }
         count: { type: integer }
 
     FeedbackRequest:

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"time"
-
-	"github.com/aditya1808/distributed-rate-limiter/constants"
 )
 
 type Algorithm string
@@ -35,15 +33,14 @@ const (
 // safe inside Redis keys and hash tags.
 var IdentifierPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
-// Rule describes a quota for a (tenant, namespace) pair.
+// Rule is a reusable quota definition. It applies to traffic only through
+// assignments, which bind it to (tenant, namespace) pairs.
 //
 // Limit/Period is the sustained rate. Burst means:
 //   - token bucket: bucket capacity (defaults to Limit)
 //   - sliding window: max requests within BurstWindow (0 disables the burst cap)
 type Rule struct {
 	ID          string        `json:"id"`
-	Tenant      string        `json:"tenant"`
-	Namespace   string        `json:"namespace"`
 	Algorithm   Algorithm     `json:"algorithm"`
 	Limit       int64         `json:"limit"`
 	Period      time.Duration `json:"period"`
@@ -54,8 +51,6 @@ type Rule struct {
 	CreatedAt   time.Time     `json:"created_at"`
 	UpdatedAt   time.Time     `json:"updated_at"`
 }
-
-func (r Rule) PairKey() string { return constants.PairKey(r.Tenant, r.Namespace) }
 
 // Capacity is the largest cost a single request can ever be granted.
 func (r Rule) Capacity() int64 {
@@ -80,12 +75,6 @@ func (r Rule) Validate() error {
 		errs = append(errs, FieldError{Field: field, Message: fmt.Sprintf(msg, args...)})
 	}
 
-	if r.Tenant != constants.DefaultTenant && !IdentifierPattern.MatchString(r.Tenant) {
-		add("tenant", "must be %q or match %s", constants.DefaultTenant, IdentifierPattern)
-	}
-	if !IdentifierPattern.MatchString(r.Namespace) {
-		add("namespace", "must match %s", IdentifierPattern)
-	}
 	if !r.Algorithm.Valid() {
 		add("algorithm", "must be one of: %s, %s", AlgorithmTokenBucket, AlgorithmSlidingWindow)
 	}

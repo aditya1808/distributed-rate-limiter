@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/aditya1808/distributed-rate-limiter/controllers/assignment"
 	"github.com/aditya1808/distributed-rate-limiter/controllers/check"
 	"github.com/aditya1808/distributed-rate-limiter/controllers/dashboard"
 	"github.com/aditya1808/distributed-rate-limiter/controllers/feedback"
@@ -15,12 +16,13 @@ import (
 )
 
 type Controllers struct {
-	Check     *check.Controller
-	Quota     *quota.Controller
-	Rule      *rule.Controller
-	Feedback  *feedback.Controller
-	Health    *health.Controller
-	Dashboard *dashboard.Controller
+	Check      *check.Controller
+	Quota      *quota.Controller
+	Rule       *rule.Controller
+	Assignment *assignment.Controller
+	Feedback   *feedback.Controller
+	Health     *health.Controller
+	Dashboard  *dashboard.Controller
 }
 
 // AddRoutes registers the public API. The dashboard is a deliberately open,
@@ -38,6 +40,10 @@ func AddRoutes(r *gin.Engine, ctl Controllers) {
 	v1.GET("/rules/:id", ctl.Rule.Get)
 	v1.PUT("/rules/:id", ctl.Rule.Update)
 	v1.DELETE("/rules/:id", ctl.Rule.Delete)
+	v1.GET("/assignments", ctl.Assignment.List)
+	v1.PUT("/assignments/:tenant/:namespace", ctl.Assignment.Put)
+	v1.GET("/assignments/:tenant/:namespace", ctl.Assignment.Get)
+	v1.DELETE("/assignments/:tenant/:namespace", ctl.Assignment.Delete)
 	v1.POST("/feedback", ctl.Feedback.Submit)
 	v1.GET("/tenants/active", ctl.Dashboard.ActiveTenants)
 }

@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/aditya1808/distributed-rate-limiter/cache"
 	"github.com/aditya1808/distributed-rate-limiter/config"
 	"github.com/aditya1808/distributed-rate-limiter/constants"
+	"github.com/aditya1808/distributed-rate-limiter/controllers/assignment"
 	"github.com/aditya1808/distributed-rate-limiter/controllers/check"
 	"github.com/aditya1808/distributed-rate-limiter/controllers/dashboard"
 	"github.com/aditya1808/distributed-rate-limiter/controllers/feedback"
@@ -24,6 +26,7 @@ import (
 	"github.com/aditya1808/distributed-rate-limiter/manager"
 	"github.com/aditya1808/distributed-rate-limiter/metrics"
 	"github.com/aditya1808/distributed-rate-limiter/middlewares"
+	"github.com/aditya1808/distributed-rate-limiter/persistence/pgstore"
 	"github.com/aditya1808/distributed-rate-limiter/persistence/redisstore"
 	"github.com/aditya1808/distributed-rate-limiter/routes"
 	"github.com/aditya1808/distributed-rate-limiter/validations"
@@ -34,6 +37,7 @@ import (
 type App struct {
 	Config       config.Config
 	Redis        *redis.Client
+	Postgres     *pgxpool.Pool
 	Metrics      *metrics.Metrics
 	Public       *gin.Engine
 	Internal     *gin.Engine
@@ -44,7 +48,8 @@ type App struct {
 	activity *manager.Activity
 }
 
-// New connects to Redis, loads rules and wires every layer. ctx bounds
+// New connects to Redis and Postgres, applies migrations, loads rules and
+// wires every layer. ctx bounds
 // startup only; background workers run until Close.
 func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error) {
 	if err := validations.Register(); err != nil {
@@ -66,12 +71,27 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		return nil, err
 	}
 
-	ruleStore := redisstore.NewRuleStore(rdb, keys)
+	pool, err := pgstore.Connect(ctx, cfg.PostgresURL, int32(cfg.PostgresMaxConns), log) // #nosec G115 -- validated small positive
+	if err != nil {
+		_ = rdb.Close()
+		return nil, err
+	}
+	if err := pgstore.Migrate(ctx, pool, log); err != nil {
+		pool.Close()
+		_ = rdb.Close()
+		return nil, err
+	}
+
+	ruleStore := pgstore.New(pool)
+	bus := redisstore.NewChangeBus(rdb, keys)
+	resolutions := redisstore.NewResolutionCache(rdb, keys)
 	workerCtx, cancel := context.WithCancel(context.Background())
 
-	ruleCache := cache.New(ruleStore, ruleStore, cfg.RuleRefreshInterval, m, log)
+	lookup := cache.NewSharedLookup(resolutions, ruleStore, cfg.RuleMissTTL, cfg.RedisTimeout, cfg.PostgresTimeout)
+	ruleCache := cache.New(ruleStore, bus, lookup, cache.Options{Refresh: cfg.RuleRefreshInterval, MissTTL: cfg.RuleMissTTL}, m, log)
 	if err := ruleCache.Start(workerCtx); err != nil {
 		cancel()
+		pool.Close()
 		_ = rdb.Close()
 		return nil, err
 	}
@@ -83,7 +103,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		DefaultAllow: cfg.DefaultAllow,
 		StoreTimeout: cfg.RedisTimeout,
 	})
-	ruleManager := manager.NewRuleManager(ruleStore, ruleCache)
+	ruleManager := manager.NewRuleManager(ruleStore, ruleCache, bus, resolutions, log)
 	adaptiveManager := manager.NewAdaptiveManager(redisstore.NewAdaptiveStore(rdb, keys))
 
 	shuttingDown := &atomic.Bool{}
@@ -96,12 +116,13 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		ExposeInstanceID: cfg.ExposeInstanceID,
 	})
 	routes.AddRoutes(public, routes.Controllers{
-		Check:     check.NewController(evaluator),
-		Quota:     quota.NewController(evaluator),
-		Rule:      rule.NewController(ruleManager),
-		Feedback:  feedback.NewController(adaptiveManager),
-		Health:    health.NewController(func(ctx context.Context) error { return rdb.Ping(ctx).Err() }, ruleCache.Loaded, shuttingDown, cfg.InstanceID),
-		Dashboard: dashboard.NewController(activity, evaluator, cfg.InstanceID),
+		Check:      check.NewController(evaluator),
+		Quota:      quota.NewController(evaluator),
+		Rule:       rule.NewController(ruleManager),
+		Assignment: assignment.NewController(ruleManager),
+		Feedback:   feedback.NewController(adaptiveManager),
+		Health:     health.NewController(func(ctx context.Context) error { return rdb.Ping(ctx).Err() }, ruleCache.Loaded, shuttingDown, cfg.InstanceID),
+		Dashboard:  dashboard.NewController(activity, evaluator, cfg.InstanceID),
 	})
 
 	internal := gin.New()
@@ -111,6 +132,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	return &App{
 		Config:       cfg,
 		Redis:        rdb,
+		Postgres:     pool,
 		Metrics:      m,
 		Public:       public,
 		Internal:     internal,
@@ -121,11 +143,13 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	}, nil
 }
 
-// Close stops background workers (flushing pending activity) and closes Redis.
+// Close stops background workers (flushing pending activity) and closes
+// the store connections.
 func (a *App) Close() error {
 	a.cancel()
 	<-a.cache.Done()
 	<-a.activity.Done()
+	a.Postgres.Close()
 	return a.Redis.Close()
 }
 

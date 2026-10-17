@@ -1,5 +1,5 @@
-# Production-like local stack: two instances sharing one Redis behind an
-# nginx round-robin load balancer on http://localhost:8080.
+# Production-like local stack: two instances sharing one Redis and one
+# Postgres behind an nginx round-robin load balancer on http://localhost:8080.
 #
 #   docker compose up --build -d
 x-app: &app
@@ -7,22 +7,39 @@ x-app: &app
   image: distributed-rate-limiter:local
   environment: &app-env
     REDIS_URL: redis://redis:6379/0
+    POSTGRES_URL: postgres://postgres:postgres@postgres:5432/ratelimiter?sslmode=disable
     LOG_LEVEL: info
     SHUTDOWN_DRAIN_DELAY: 2s
   depends_on:
     redis:
+      condition: service_healthy
+    postgres:
       condition: service_healthy
   restart: unless-stopped
 
 services:
   redis:
     image: redis:7-alpine
-    # Rules live in Redis, so it must persist across restarts.
+    # Quota state and adaptive multipliers survive a Redis restart.
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     volumes:
       - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ratelimiter
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "ratelimiter"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -53,3 +70,4 @@ services:
 
 volumes:
   redis-data:
+  postgres-data:

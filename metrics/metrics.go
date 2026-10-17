@@ -22,6 +22,7 @@ type Metrics struct {
 	StoreDuration *prometheus.HistogramVec
 	RuleCacheSize prometheus.Gauge
 	RuleReloads   *prometheus.CounterVec
+	RuleMisses    *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -51,19 +52,23 @@ func New() *Metrics {
 			Buckets: []float64{.0002, .0005, .001, .0025, .005, .01, .025, .05, .1},
 		}, []string{"op"}),
 		RuleCacheSize: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "ratelimit_rule_cache_rules",
-			Help: "Rules currently held in this instance's cache.",
+			Name: "ratelimit_rule_cache_assignments",
+			Help: "Assignments (with their rules) held in this instance's cache.",
 		}),
 		RuleReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ratelimit_rule_cache_updates_total",
-			Help: "Rule cache updates by source (event, reload, local).",
+			Help: "Full rule cache reloads by trigger (event, periodic, write).",
+		}, []string{"source"}),
+		RuleMisses: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ratelimit_rule_cache_misses_total",
+			Help: "Lookups for pairs absent from the snapshot, by where they were answered (local, redis, postgres, error).",
 		}, []string{"source"}),
 	}
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.HTTPRequests, m.HTTPDuration, m.Decisions, m.StoreErrors,
-		m.StoreDuration, m.RuleCacheSize, m.RuleReloads,
+		m.StoreDuration, m.RuleCacheSize, m.RuleReloads, m.RuleMisses,
 	)
 	return m
 }

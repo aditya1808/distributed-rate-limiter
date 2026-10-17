@@ -83,16 +83,14 @@ func HandleError(c *gin.Context, err error) {
 		WriteProblem(c, http.StatusNotFound, "not-found", "Resource not found", "", nil)
 	case errors.Is(err, types.ErrNoRule):
 		WriteProblem(c, http.StatusNotFound, "no-rule", "No rule matches", err.Error(), nil)
-	case errors.Is(err, types.ErrConflict):
-		WriteProblem(c, http.StatusConflict, "conflict", "Rule already exists",
-			"a rule already exists for this tenant and namespace", nil)
+	case errors.Is(err, types.ErrRuleInUse):
+		WriteProblem(c, http.StatusConflict, "rule-in-use", "Rule is assigned",
+			"delete or reassign every assignment that uses this rule first", nil)
+	case errors.Is(err, types.ErrUnknownRule):
+		Validation(c, []types.FieldError{{Field: "rule_id", Message: "no rule with this id"}})
 	case errors.Is(err, types.ErrVersionMismatch):
 		WriteProblem(c, http.StatusPreconditionFailed, "version-mismatch", "Version mismatch",
 			"the rule was modified; fetch it again and retry with the new ETag", nil)
-	case errors.Is(err, types.ErrUnsupportedSchema):
-		slog.Warn("[CONTROLLER] stored record is newer than this build", "error", err)
-		WriteProblem(c, http.StatusServiceUnavailable, "schema-unsupported", "Stored record written by a newer version",
-			"retry shortly; a deployment is in progress", nil)
 	case errors.Is(err, types.ErrStoreUnavailable):
 		WriteProblem(c, http.StatusServiceUnavailable, "store-unavailable", "State store unavailable", "", nil)
 	case errors.Is(err, context.Canceled):

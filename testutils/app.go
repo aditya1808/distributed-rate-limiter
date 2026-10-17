@@ -49,6 +49,8 @@ func WithRedisTimeout(d time.Duration) Option { return func(c *config.Config) { 
 
 func WithMinIdleConns(n int) Option { return func(c *config.Config) { c.RedisMinIdleConns = n } }
 
+func WithMissTTL(d time.Duration) Option { return func(c *config.Config) { c.RuleMissTTL = d } }
+
 func NewTestApp(tb testing.TB, opts ...Option) *TestApp {
 	tb.Helper()
 	gin.SetMode(gin.TestMode)
@@ -58,7 +60,10 @@ func NewTestApp(tb testing.TB, opts ...Option) *TestApp {
 		RedisURL:            RedisURL(tb),
 		RedisTimeout:        500 * time.Millisecond,
 		RedisPoolSize:       100,
+		PostgresTimeout:     500 * time.Millisecond,
+		PostgresMaxConns:    10,
 		RuleRefreshInterval: time.Second,
+		RuleMissTTL:         5 * time.Second,
 		DefaultAllow:        true,
 		InstanceID:          "test",
 		ExposeInstanceID:    true,
@@ -69,6 +74,7 @@ func NewTestApp(tb testing.TB, opts ...Option) *TestApp {
 	if cfg.KeyPrefix == "" {
 		cfg.KeyPrefix = UniquePrefix(tb, rdb)
 	}
+	cfg.PostgresURL = PostgresSchemaURL(tb, cfg.KeyPrefix)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -167,12 +173,40 @@ func (a *TestApp) Caller(method, path string, body any) Response {
 	return a.Do(method, path, body, CallerHeaders())
 }
 
-// CreateRule creates a rule and fails the test unless it returns 201.
-func (a *TestApp) CreateRule(rule map[string]any) map[string]any {
+// CreateRule creates a rule from the map's rule fields and returns it. If the
+// map also names a "namespace", the rule is assigned to ("tenant" or "*",
+// namespace). Fails the test on any non-success status.
+func (a *TestApp) CreateRule(fields map[string]any) map[string]any {
 	a.tb.Helper()
-	resp := a.Caller(http.MethodPost, "/v1/rules", rule)
+	body := map[string]any{}
+	for k, v := range fields {
+		body[k] = v
+	}
+	tenant, _ := body["tenant"].(string)
+	namespace, _ := body["namespace"].(string)
+	delete(body, "tenant")
+	delete(body, "namespace")
+
+	resp := a.Caller(http.MethodPost, "/v1/rules", body)
 	if resp.Status != http.StatusCreated {
 		a.tb.Fatalf("create rule: status %d body %s", resp.Status, resp.Body)
+	}
+	rule := resp.Map(a.tb)
+	if namespace != "" {
+		if tenant == "" {
+			tenant = "*"
+		}
+		a.Assign(tenant, namespace, rule["id"].(string))
+	}
+	return rule
+}
+
+// Assign binds a rule to a pair and fails the test unless it returns 200 or 201.
+func (a *TestApp) Assign(tenant, namespace, ruleID string) map[string]any {
+	a.tb.Helper()
+	resp := a.Caller(http.MethodPut, "/v1/assignments/"+tenant+"/"+namespace, map[string]any{"rule_id": ruleID})
+	if resp.Status != http.StatusCreated && resp.Status != http.StatusOK {
+		a.tb.Fatalf("assign rule: status %d body %s", resp.Status, resp.Body)
 	}
 	return resp.Map(a.tb)
 }

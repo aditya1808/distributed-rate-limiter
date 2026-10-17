@@ -87,7 +87,9 @@ func uniqueTenant(t *testing.T) string {
 	return "e2e-" + hex.EncodeToString(b)
 }
 
-func (e env) createRule(t *testing.T, rule map[string]any) string {
+// assignRule creates rule and assigns it to tenant in namespace. Cleanup runs
+// in reverse, so the assignment is removed before the rule.
+func (e env) assignRule(t *testing.T, tenant, namespace string, rule map[string]any) string {
 	t.Helper()
 	status, _, body := e.do(t, http.MethodPost, e.urls[0]+"/v1/rules", rule)
 	require.Equal(t, http.StatusCreated, status, "create rule: %s", body)
@@ -95,6 +97,11 @@ func (e env) createRule(t *testing.T, rule map[string]any) string {
 	require.NoError(t, json.Unmarshal(body, &created))
 	id := created["id"].(string)
 	t.Cleanup(func() { e.do(t, http.MethodDelete, e.urls[0]+"/v1/rules/"+id, nil) })
+
+	path := fmt.Sprintf("%s/v1/assignments/%s/%s", e.urls[0], tenant, namespace)
+	status, _, body = e.do(t, http.MethodPut, path, map[string]any{"rule_id": id})
+	require.Equal(t, http.StatusCreated, status, "assign rule: %s", body)
+	t.Cleanup(func() { e.do(t, http.MethodDelete, path, nil) })
 	// Give every instance's cache time to receive the change event.
 	time.Sleep(500 * time.Millisecond)
 	return id
@@ -114,13 +121,13 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 			e := setup(t)
 			tenant := uniqueTenant(t)
 			const burst = 50
-			rule := map[string]any{"tenant": tenant, "namespace": "orders", "algorithm": algorithm, "period": "1h"}
+			rule := map[string]any{"algorithm": algorithm, "period": "1h"}
 			if algorithm == "token_bucket" {
 				rule["limit"], rule["burst"] = 1, burst
 			} else {
 				rule["limit"] = burst
 			}
-			e.createRule(t, rule)
+			e.assignRule(t, tenant, "orders", rule)
 
 			const requests = 400
 			var (
@@ -186,8 +193,8 @@ func TestE2E_ExactAdmissionAcrossInstances(t *testing.T) {
 func TestE2E_RuleUpdateVisibleEverywhere(t *testing.T) {
 	e := setup(t)
 	tenant := uniqueTenant(t)
-	rule := map[string]any{"tenant": tenant, "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 3}
-	id := e.createRule(t, rule)
+	rule := map[string]any{"algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 3}
+	id := e.assignRule(t, tenant, "orders", rule)
 
 	rule["burst"] = 9
 	status, _, body := e.do(t, http.MethodPut, e.urls[len(e.urls)-1]+"/v1/rules/"+id, rule, "If-Match", `"1"`)

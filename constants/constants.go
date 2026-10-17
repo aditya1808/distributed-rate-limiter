@@ -30,8 +30,6 @@ func NewKeyspace(prefix string) Keyspace {
 
 func (k Keyspace) Prefix() string { return k.prefix }
 
-func (k Keyspace) RulesData() string    { return k.prefix + ":{rules}:data" }
-func (k Keyspace) RulesIndex() string   { return k.prefix + ":{rules}:index" }
 func (k Keyspace) RulesChannel() string { return k.prefix + ":rules:changed" }
 func (k Keyspace) Activity() string     { return k.prefix + ":activity" }
 
@@ -45,6 +43,11 @@ func (k Keyspace) Seq(stateKey string) string { return stateKey + ":seq" }
 
 func (k Keyspace) Adaptive(tenant, namespace string) string {
 	return fmt.Sprintf("%s:{%s}:adaptive", k.prefix, PairKey(tenant, namespace))
+}
+
+// Resolution caches the effective rule for a pair (see persistence.ResolutionCache).
+func (k Keyspace) Resolution(tenant, namespace string) string {
+	return fmt.Sprintf("%s:{%s}:resolution", k.prefix, PairKey(tenant, namespace))
 }
 
 func PairKey(tenant, namespace string) string { return tenant + "|" + namespace }

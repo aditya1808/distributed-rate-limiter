@@ -6,8 +6,10 @@ decision is a single atomic Lua script that uses the store's clock.
 
 - Two algorithms per rule: **token bucket** and **sliding window log**, both
   with separate *sustained* and *burst* limits.
-- Rules managed at runtime over an authenticated API, propagated to every
-  instance in milliseconds (pub/sub) with a periodic reload as a safety net.
+- Rules are reusable entities stored in Postgres and **assigned** to
+  `(tenant, namespace)` pairs, with `*` as a per-namespace default. Changes
+  reach every instance in milliseconds (pub/sub) with a periodic reload as a
+  safety net; checks never wait on Postgres.
 - Observable quota endpoint, Prometheus metrics on an internal port, structured
   JSON logs, and an admin dashboard.
 - Adaptive limits: report a downstream error rate and limits tighten
@@ -28,7 +30,8 @@ Code.
 ## Live deployment
 
 Deployed on DigitalOcean App Platform (blr1): two instances behind the platform
-load balancer, sharing a managed Valkey cluster. Every push to `main` is
+load balancer, sharing a managed Valkey cluster (quota state) and a managed
+Postgres cluster (rules and assignments). Every push to `main` is
 tested, built into an image, rolled out, and then verified by the e2e suite and
 a cross-instance load test against the public URL.
 
@@ -60,7 +63,7 @@ figure is dominated by network distance and a fresh TLS handshake per request.
 Requirements: Go 1.26+, Docker.
 
 ```bash
-# Two instances + Redis behind nginx on http://localhost:8080
+# Two instances + Redis + Postgres behind nginx on http://localhost:8080
 make up
 
 # Every /v1 endpoint needs a Bearer JWT (format-checked only for now, see Limitations)
@@ -69,7 +72,12 @@ JWT=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vIn0.c2lnbmF0dXJl
 # Create a rule: 10 requests/second sustained, bursts of up to 20
 curl -s -X POST localhost:8080/v1/rules \
   -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
-  -d '{"tenant":"acme","namespace":"orders","algorithm":"token_bucket","limit":10,"period":"1s","burst":20}'
+  -d '{"algorithm":"token_bucket","limit":10,"period":"1s","burst":20}'
+# {"id":"r_01...","version":1,...}
+
+# Assign it to acme in the orders namespace (use * as the tenant for a namespace default)
+curl -s -X PUT localhost:8080/v1/assignments/acme/orders \
+  -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"rule_id":"r_01..."}'
 
 # Ask for a decision
 curl -s -X POST localhost:8080/v1/check -H "Authorization: Bearer $JWT" -d '{"tenant":"acme","namespace":"orders"}'
@@ -85,10 +93,11 @@ make e2e load
 # Dashboard (public, no login): http://localhost:8080/dashboard
 ```
 
-Run the test suite (needs a Redis on `localhost:6379`; `make redis` starts one):
+Run the test suite (needs Redis on `localhost:6379` and Postgres on
+`localhost:5432`; `make redis postgres` starts both):
 
 ```bash
-make redis test      # all tests with the race detector
+make redis postgres test   # all tests with the race detector
 make stress          # concurrency tests repeated 20x
 make lint
 ```
@@ -99,9 +108,10 @@ make lint
 |---|---|---|---|
 | `POST` | `/v1/check` | JWT | Decide and consume quota: `{tenant, namespace, cost?}` |
 | `GET` | `/v1/quota/{tenant}/{namespace}` | JWT | Current quota without consuming |
-| `POST` | `/v1/rules` | JWT | Create a rule |
-| `GET` | `/v1/rules` | JWT | List rules (`?tenant=&namespace=`) |
-| `GET` `PUT` `DELETE` | `/v1/rules/{id}` | JWT | Read, replace (`If-Match` required), delete |
+| `POST` `GET` | `/v1/rules` | JWT | Create, list rules |
+| `GET` `PUT` `DELETE` | `/v1/rules/{id}` | JWT | Read, replace (`If-Match` required), delete (`409` while assigned) |
+| `GET` | `/v1/assignments` | JWT | List assignments (`?tenant=&namespace=&rule_id=`) |
+| `PUT` `GET` `DELETE` | `/v1/assignments/{tenant}/{namespace}` | JWT | Assign a rule (`201` new, `200` replaced), read, remove |
 | `POST` | `/v1/feedback` | JWT | Report downstream error rate → adaptive limit |
 | `GET` | `/v1/tenants/active` | JWT | Recently active tenants with quota (JSON) |
 | `GET` | `/dashboard` | none | Server-rendered HTML dashboard, auto-refreshes |
@@ -129,12 +139,12 @@ Design choices worth calling out:
 - **Optimistic concurrency** on rules: `ETag` on every read, `If-Match`
   required on `PUT` (`428` if missing, `412` if stale).
 
-### Rules
+### Rules and assignments
+
+A rule is a reusable limit with no scope:
 
 ```jsonc
 {
-  "tenant": "acme",            // or "*" for a per-tenant default rule
-  "namespace": "orders",
   "algorithm": "sliding_window",
   "limit": 100,                // sustained: 100 per period
   "period": "1m",
@@ -144,9 +154,17 @@ Design choices worth calling out:
 }
 ```
 
-Lookup is exact `(tenant, namespace)` first, then the `"*"` default for the
-namespace. A default rule gives **each tenant its own quota** (the real tenant
-is always part of the state key), never one shared bucket.
+An assignment says which rule a `(tenant, namespace)` pair gets:
+`PUT /v1/assignments/acme/orders {"rule_id": "r_01..."}`. Each pair has at
+most one rule; one rule can be assigned to any number of pairs. Tenant `*`
+is the default for a namespace.
+
+Lookup is the exact pair first, then the `*` default, then `DEFAULT_POLICY`.
+A shared or default rule gives **each pair its own quota** (the real tenant
+is always part of the state key), never one shared bucket. Every instance
+holds all assignments in memory; a pair missing from that snapshot is looked
+up in a Redis cache, then Postgres, and the answer (including "no rule") is
+cached for `RULE_MISS_TTL`.
 
 ## Algorithms and why
 
@@ -196,19 +214,20 @@ The short version (full table in
 - **Clock skew:** instances never send time; Redis `TIME` is used.
 - **Rule propagation:** milliseconds via pub/sub; worst case bounded by the
   5 s reload. Worst-case over-admission during that window is one extra burst.
-- **Concurrent rule edits:** atomic version checks in Lua; `409` / `412`.
+- **Concurrent rule edits:** `UPDATE ... WHERE version = $n`; `412` for the
+  loser. Assignments are upserts on the pair's primary key.
 - **Store slow or down:** 50 ms timeout, per-rule fail mode, `degraded:true`.
 
 ## Testing
 
 | Layer | Where | What it proves |
 |---|---|---|
-| Unit | `limiter`, `types`, `manager`, `cache` | Algorithms, validation, adaptive maths, cache versioning |
+| Unit | `limiter`, `types`, `manager`, `cache` | Algorithms, validation, adaptive maths, cache reloads and the miss fallback |
 | Contract | `limiter/contract_test.go` | Lua scripts == Go reference, including script-cache flush |
 | Concurrency | `limiter/concurrency_test.go` | Exact admission at 500-way contention; naive control over-admits |
-| Store | `persistence/redisstore` | Atomic create/update races, pub/sub, schema versioning |
+| Store | `persistence/pgstore` | Real Postgres: version races, upsert races, in-use deletes, resolve order, concurrent migrations |
 | HTTP integration | `controllers/*` | Every endpoint; every response validated against the OpenAPI spec |
-| Multi-instance | `test/multiinstance_test.go` | Two app instances, one Redis: exact admission and rule propagation |
+| Multi-instance | `test/multiinstance_test.go` | Two app instances, one Redis and Postgres: exact admission, rule and assignment propagation |
 | End-to-end | `test/e2e` (`-tags e2e`) | Real deployment over HTTP: exact admission across ≥ 2 instances |
 | Load | `tools/loadtest` | Throughput, latency, per-instance split, exact admission |
 
@@ -226,9 +245,13 @@ test against the public URL.
 | `REDIS_TIMEOUT` | `50ms` | Hard limit per store call on the hot path |
 | `REDIS_POOL_SIZE` | `50` | |
 | `REDIS_MIN_IDLE_CONNS` | `REDIS_POOL_SIZE` | Dialed before the instance reports ready and kept open, so bursts never pay for TLS dials inside `REDIS_TIMEOUT` |
+| `POSTGRES_URL` | `postgres://postgres:postgres@localhost:5432/ratelimiter?sslmode=disable` | Rules and assignments; migrations run at startup |
+| `POSTGRES_TIMEOUT` | `200ms` | Per query on the snapshot-miss fallback |
+| `POSTGRES_MAX_CONNS` | `10` | |
 | `KEY_PREFIX` | `rl` | Isolates environments sharing a store |
 | `DEFAULT_POLICY` | `allow` | Decision when no rule matches (`allow` / `deny`) |
-| `RULE_REFRESH_INTERVAL` | `5s` | Full rule reload, repairs missed pub/sub |
+| `RULE_REFRESH_INTERVAL` | `5s` | Full reload of all assignments, repairs missed pub/sub |
+| `RULE_MISS_TTL` | `5s` | How long a snapshot-miss answer (including "no rule") is cached, locally and in Redis |
 | `PORT` / `INTERNAL_PORT` | `8080` / `9090` | Public API / metrics |
 | `INSTANCE_ID` | hostname | Returned as `X-Instance-ID` |
 | `EXPOSE_INSTANCE_ID` | `true` | |
@@ -241,11 +264,13 @@ test against the public URL.
 The app spec is [.do/app.yaml](.do/app.yaml): two `apps-s-1vcpu-1gb`
 instances, readiness on `/readyz`, liveness on `/healthz`, `REDIS_URL` bound to
 the managed Valkey cluster (`${rl-valkey.DATABASE_URL}`, TLS, trusted-source
-restricted to the app). The only CI secret is the DigitalOcean API token;
-nothing sensitive is committed.
+restricted to the app) and `POSTGRES_URL` bound to the managed Postgres
+cluster (`${rl-postgres.DATABASE_URL}`, TLS, trusted-source restricted to the
+app). The only CI secret is the DigitalOcean API token; nothing sensitive is
+committed.
 
-Valkey runs with `maxmemory-policy volatile-ttl`. Rules have no TTL, so they
-are never evicted. Under memory pressure the quota keys closest to expiry go
+Valkey runs with `maxmemory-policy volatile-ttl`. Under memory pressure the
+quota keys closest to expiry go
 first; for a token bucket that is the bucket closest to full, so evicting it
 barely changes any decision. The default `noeviction` would instead fail every
 write and degrade every decision.
@@ -260,6 +285,7 @@ To recreate from scratch:
 ```bash
 doctl databases create rl-valkey --engine valkey --version 8 --region blr1 --size db-s-1vcpu-1gb
 doctl databases configuration update <db-id> --engine valkey --config-json '{"valkey_maxmemory_policy":"volatile-ttl","valkey_timeout":0}'
+doctl databases create rl-postgres --engine pg --version 17 --region blr1 --size db-s-1vcpu-1gb
 IMAGE_TAG=<sha> envsubst '$IMAGE_TAG' < .do/app.yaml > /tmp/app.yaml
 doctl apps create --spec /tmp/app.yaml --wait
 gh variable set DO_APP_ID -b <app-id>; gh variable set DO_APP_URL -b <url>   # enables CD
@@ -276,10 +302,10 @@ middlewares/       recovery, request id, body limit, access log, metrics, JWT fo
 controllers/       HTTP handlers (+ HTTP integration tests)
 schemas/           request/response wire types
 validations/       custom validators
-manager/           business logic: evaluator, rules, adaptive, activity
+manager/           business logic: evaluator, rules and assignments, adaptive, activity
 limiter/           algorithms: Lua scripts + Go reference
-cache/             in-process rule snapshot
-persistence/       store interfaces; redisstore implementation
+cache/             in-process binding snapshot + Redis/Postgres miss fallback
+persistence/       store interfaces; pgstore (rules, assignments, migrations), redisstore
 types/             domain types and errors
 metrics/           Prometheus collectors
 apispec/           OpenAPI 3 contract
@@ -290,9 +316,12 @@ docs/              architecture and ADRs
 
 ## Limitations and what I would do next
 
-- **Rules live in Redis.** Their durability equals the store's (managed Valkey
-  persists, and Compose enables AOF). At larger scale rules belong in a
-  durable database, with Redis only for counters and the change channel.
+- **Rule changes are not transactional with their notification.** The
+  Postgres commit and the Redis publish are separate; a lost publish is
+  repaired by the periodic reload, so other instances can lag by up to
+  `RULE_REFRESH_INTERVAL`. An outbox table would close this.
+- **Full reload per change.** Every change reloads all assignments. Fine for
+  thousands of pairs; millions would need incremental reloads.
 - **Failover can reset counters.** Redis replication is asynchronous, so a
   failover can lose the latest writes and admit up to one extra burst per key.
 - **Rule changes reset quota.** State keys are per rule version, so editing a

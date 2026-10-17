@@ -11,7 +11,11 @@ import (
 )
 
 func validRule() map[string]any {
-	return map[string]any{"tenant": "acme", "namespace": "orders", "algorithm": "token_bucket", "limit": 300, "period": "1m", "burst": 20}
+	return map[string]any{"algorithm": "token_bucket", "limit": 300, "period": "1m", "burst": 20}
+}
+
+func ifMatch(v string) map[string]string {
+	return testutils.CallerHeaders(map[string]string{"If-Match": v})
 }
 
 func TestRules_Lifecycle(t *testing.T) {
@@ -25,18 +29,16 @@ func TestRules_Lifecycle(t *testing.T) {
 	assert.Equal(t, `"1"`, resp.Header.Get("ETag"))
 	assert.EqualValues(t, 1, created["version"])
 	assert.Equal(t, "1m", created["period"])
+	assert.NotContains(t, created, "tenant", "rules have no scope; assignments do")
 
 	resp = app.Caller(http.MethodGet, "/v1/rules/"+id, nil)
 	require.Equal(t, http.StatusOK, resp.Status)
 	assert.Equal(t, `"1"`, resp.Header.Get("ETag"))
-
-	list := app.Caller(http.MethodGet, "/v1/rules?tenant=acme", nil).Map(t)
-	assert.EqualValues(t, 1, list["count"])
-	assert.EqualValues(t, 0, app.Caller(http.MethodGet, "/v1/rules?tenant=globex", nil).Map(t)["count"])
+	assert.EqualValues(t, 1, app.Caller(http.MethodGet, "/v1/rules", nil).Map(t)["count"])
 
 	update := validRule()
 	update["limit"] = 600
-	resp = app.Do(http.MethodPut, "/v1/rules/"+id, update, testutils.CallerHeaders(map[string]string{"If-Match": `"1"`}))
+	resp = app.Do(http.MethodPut, "/v1/rules/"+id, update, ifMatch(`"1"`))
 	require.Equal(t, http.StatusOK, resp.Status, "body: %s", resp.Body)
 	assert.Equal(t, `"2"`, resp.Header.Get("ETag"))
 	assert.EqualValues(t, 600, resp.Map(t)["limit"])
@@ -46,21 +48,27 @@ func TestRules_Lifecycle(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, app.Caller(http.MethodDelete, "/v1/rules/"+id, nil).Status)
 }
 
-func TestRules_UpdateTakesEffectWithoutRestart(t *testing.T) {
+func TestRules_UpdateTakesEffectForEveryAssignedPair(t *testing.T) {
 	app := testutils.NewTestApp(t)
 	r := validRule()
 	r["limit"], r["period"], r["burst"] = 1, "1h", 1
 	id := app.CreateRule(r)["id"].(string)
+	app.Assign("acme", "orders", id)
+	app.Assign("globex", "search", id)
 
-	assert.Equal(t, true, app.Check("acme", "orders", 0)["allowed"])
-	assert.Equal(t, false, app.Check("acme", "orders", 0)["allowed"])
+	for _, p := range [][2]string{{"acme", "orders"}, {"globex", "search"}} {
+		assert.Equal(t, true, app.Check(p[0], p[1], 0)["allowed"])
+		assert.Equal(t, false, app.Check(p[0], p[1], 0)["allowed"])
+	}
 
 	r["burst"] = 5
-	resp := app.Do(http.MethodPut, "/v1/rules/"+id, r, testutils.CallerHeaders(map[string]string{"If-Match": `"1"`}))
+	resp := app.Do(http.MethodPut, "/v1/rules/"+id, r, ifMatch(`"1"`))
 	require.Equal(t, http.StatusOK, resp.Status)
-	body := app.Check("acme", "orders", 0)
-	assert.Equal(t, true, body["allowed"])
-	assert.EqualValues(t, 5, body["limit"])
+	for _, p := range [][2]string{{"acme", "orders"}, {"globex", "search"}} {
+		body := app.Check(p[0], p[1], 0)
+		assert.Equal(t, true, body["allowed"], "%v starts fresh under the new version", p)
+		assert.EqualValues(t, 5, body["limit"])
+	}
 }
 
 func TestRules_OptimisticConcurrency(t *testing.T) {
@@ -70,41 +78,38 @@ func TestRules_OptimisticConcurrency(t *testing.T) {
 	resp := app.Caller(http.MethodPut, "/v1/rules/"+id, validRule())
 	assert.Equal(t, http.StatusPreconditionRequired, resp.Status)
 
-	resp = app.Do(http.MethodPut, "/v1/rules/"+id, validRule(), testutils.CallerHeaders(map[string]string{"If-Match": `"7"`}))
+	resp = app.Do(http.MethodPut, "/v1/rules/"+id, validRule(), ifMatch(`"7"`))
 	assert.Equal(t, http.StatusPreconditionFailed, resp.Status)
 
-	resp = app.Do(http.MethodPut, "/v1/rules/"+id, validRule(), testutils.CallerHeaders(map[string]string{"If-Match": `W/"1"`}))
+	resp = app.Do(http.MethodPut, "/v1/rules/"+id, validRule(), ifMatch(`W/"1"`))
 	assert.Equal(t, http.StatusOK, resp.Status, "weak ETags are accepted")
 
-	resp = app.Do(http.MethodPut, "/v1/rules/r_missing", validRule(), testutils.CallerHeaders(map[string]string{"If-Match": `"1"`}))
+	resp = app.Do(http.MethodPut, "/v1/rules/r_missing", validRule(), ifMatch(`"1"`))
 	assert.Equal(t, http.StatusNotFound, resp.Status)
 }
 
-func TestRules_ScopeIsImmutable(t *testing.T) {
+func TestRules_CannotDeleteWhileAssigned(t *testing.T) {
 	app := testutils.NewTestApp(t)
 	id := app.CreateRule(validRule())["id"].(string)
-	moved := validRule()
-	moved["tenant"] = "globex"
-	resp := app.Do(http.MethodPut, "/v1/rules/"+id, moved, testutils.CallerHeaders(map[string]string{"If-Match": `"1"`}))
-	assert.Equal(t, http.StatusBadRequest, resp.Status)
-}
+	app.Assign("acme", "orders", id)
 
-func TestRules_Conflict(t *testing.T) {
-	app := testutils.NewTestApp(t)
-	app.CreateRule(validRule())
-	assert.Equal(t, http.StatusConflict, app.Caller(http.MethodPost, "/v1/rules", validRule()).Status)
+	resp := app.Caller(http.MethodDelete, "/v1/rules/"+id, nil)
+	assert.Equal(t, http.StatusConflict, resp.Status)
+	assert.Equal(t, "urn:ratelimiter:problem:rule-in-use", resp.Map(t)["type"])
+
+	require.Equal(t, http.StatusNoContent, app.Caller(http.MethodDelete, "/v1/assignments/acme/orders", nil).Status)
+	assert.Equal(t, http.StatusNoContent, app.Caller(http.MethodDelete, "/v1/rules/"+id, nil).Status)
 }
 
 func TestRules_Validation(t *testing.T) {
 	app := testutils.NewTestApp(t)
 	cases := map[string]map[string]any{
-		"bad algorithm":          {"namespace": "orders", "algorithm": "leaky", "limit": 1, "period": "1s"},
-		"bad period":             {"namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "soon"},
-		"period too short":       {"namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "10ms"},
-		"bad tenant":             {"tenant": "a b", "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1s"},
-		"missing limit":          {"namespace": "orders", "algorithm": "token_bucket", "period": "1s"},
-		"burst window on bucket": {"namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1m", "burst_window": "1s"},
-		"window over cap":        {"namespace": "orders", "algorithm": "sliding_window", "limit": 20000, "period": "1m"},
+		"bad algorithm":          {"algorithm": "leaky", "limit": 1, "period": "1s"},
+		"bad period":             {"algorithm": "token_bucket", "limit": 1, "period": "soon"},
+		"period too short":       {"algorithm": "token_bucket", "limit": 1, "period": "10ms"},
+		"missing limit":          {"algorithm": "token_bucket", "period": "1s"},
+		"burst window on bucket": {"algorithm": "token_bucket", "limit": 1, "period": "1m", "burst_window": "1s"},
+		"window over cap":        {"algorithm": "sliding_window", "limit": 20000, "period": "1m"},
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -113,6 +118,11 @@ func TestRules_Validation(t *testing.T) {
 			assert.NotEmpty(t, resp.Map(t)["errors"])
 		})
 	}
+
+	scoped := validRule()
+	scoped["tenant"] = "acme"
+	resp := app.Do(http.MethodPost, "/v1/rules", scoped, testutils.CallerHeaders())
+	assert.Equal(t, http.StatusBadRequest, resp.Status, "scope belongs on an assignment, not the rule")
 }
 
 func TestRules_RequireJWT(t *testing.T) {

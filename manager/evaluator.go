@@ -14,7 +14,7 @@ import (
 )
 
 type RuleResolver interface {
-	Resolve(tenant, namespace string) (types.Rule, types.MatchKind, bool)
+	Resolve(ctx context.Context, tenant, namespace string) (types.Rule, types.MatchKind, bool)
 }
 
 type ActivityRecorder interface {
@@ -54,7 +54,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, tenant, namespace string, cost
 	// is where operators notice tenants that are missing a rule.
 	e.activity.Touch(tenant, namespace)
 
-	rule, _, ok := e.rules.Resolve(tenant, namespace)
+	rule, _, ok := e.rules.Resolve(ctx, tenant, namespace)
 	if !ok {
 		d.Allowed = e.cfg.DefaultAllow
 		d.Reason = types.ReasonNoRule
@@ -67,7 +67,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, tenant, namespace string, cost
 
 	if cost > rule.Capacity() {
 		d.Reason = types.ReasonCostExceedsCapacity
-		e.metrics.RecordDecision(rule.Namespace, string(rule.Algorithm), false, d.Reason)
+		e.metrics.RecordDecision(namespace, string(rule.Algorithm), false, d.Reason)
 		return d, nil
 	}
 
@@ -81,7 +81,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, tenant, namespace string, cost
 		d.Allowed = rule.FailOpen
 		d.Degraded = true
 		d.Reason = types.ReasonStoreUnavailable
-		e.metrics.RecordDecision(rule.Namespace, string(rule.Algorithm), d.Allowed, d.Reason)
+		e.metrics.RecordDecision(namespace, string(rule.Algorithm), d.Allowed, d.Reason)
 		return d, nil
 	}
 
@@ -94,14 +94,14 @@ func (e *Evaluator) Evaluate(ctx context.Context, tenant, namespace string, cost
 	if !res.Allowed {
 		d.Reason = types.ReasonQuotaExceeded
 	}
-	e.metrics.RecordDecision(rule.Namespace, string(rule.Algorithm), d.Allowed, d.Reason)
+	e.metrics.RecordDecision(namespace, string(rule.Algorithm), d.Allowed, d.Reason)
 	return d, nil
 }
 
 // Peek reports current quota without consuming it. Unlike Evaluate, store
 // failures are returned: an observation has no safe fallback value.
 func (e *Evaluator) Peek(ctx context.Context, tenant, namespace string) (types.Quota, error) {
-	rule, match, ok := e.rules.Resolve(tenant, namespace)
+	rule, match, ok := e.rules.Resolve(ctx, tenant, namespace)
 	if !ok {
 		return types.Quota{}, types.ErrNoRule
 	}

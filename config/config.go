@@ -21,8 +21,16 @@ type Config struct {
 	RedisMinIdleConns int
 	KeyPrefix         string
 
+	PostgresURL string
+	// PostgresTimeout bounds a rule lookup on the hot path (cache miss only).
+	PostgresTimeout  time.Duration
+	PostgresMaxConns int
+
 	RuleRefreshInterval time.Duration
-	DefaultAllow        bool
+	// RuleMissTTL is how long an answer for a pair missing from the snapshot
+	// (including "no rule") is reused, locally and in Redis.
+	RuleMissTTL  time.Duration
+	DefaultAllow bool
 
 	InstanceID       string
 	ExposeInstanceID bool
@@ -43,7 +51,11 @@ func Load() (Config, error) {
 		RedisPoolSize:       num("REDIS_POOL_SIZE", 50, &errs),
 		RedisMinIdleConns:   num("REDIS_MIN_IDLE_CONNS", -1, &errs),
 		KeyPrefix:           str("KEY_PREFIX", "rl"),
+		PostgresURL:         str("POSTGRES_URL", "postgres://postgres:postgres@localhost:5432/ratelimiter?sslmode=disable"),
+		PostgresTimeout:     dur("POSTGRES_TIMEOUT", 200*time.Millisecond, &errs),
+		PostgresMaxConns:    num("POSTGRES_MAX_CONNS", 10, &errs),
 		RuleRefreshInterval: dur("RULE_REFRESH_INTERVAL", 5*time.Second, &errs),
+		RuleMissTTL:         dur("RULE_MISS_TTL", 5*time.Second, &errs),
 		InstanceID:          str("INSTANCE_ID", host),
 		ExposeInstanceID:    boolean("EXPOSE_INSTANCE_ID", true, &errs),
 		LogLevel:            str("LOG_LEVEL", "info"),
@@ -72,6 +84,15 @@ func Load() (Config, error) {
 	}
 	if cfg.RuleRefreshInterval <= 0 {
 		errs = append(errs, errors.New("RULE_REFRESH_INTERVAL must be positive"))
+	}
+	if cfg.RuleMissTTL <= 0 {
+		errs = append(errs, errors.New("RULE_MISS_TTL must be positive"))
+	}
+	if cfg.PostgresTimeout <= 0 {
+		errs = append(errs, errors.New("POSTGRES_TIMEOUT must be positive"))
+	}
+	if cfg.PostgresMaxConns < 1 {
+		errs = append(errs, errors.New("POSTGRES_MAX_CONNS must be at least 1"))
 	}
 	return cfg, errors.Join(errs...)
 }

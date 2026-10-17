@@ -4,12 +4,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/aditya1808/distributed-rate-limiter/constants"
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
 type ruleFields struct {
-	Namespace   string `json:"namespace" binding:"required,identifier"`
 	Algorithm   string `json:"algorithm" binding:"required,oneof=token_bucket sliding_window"`
 	Limit       int64  `json:"limit" binding:"required,min=1,max=1000000"`
 	Period      string `json:"period" binding:"required"`
@@ -18,31 +16,17 @@ type ruleFields struct {
 	FailOpen    bool   `json:"fail_open"`
 }
 
-type RulePostRequestBody struct {
-	// Tenant defaults to "*", the namespace-wide default rule.
-	Tenant string `json:"tenant" binding:"omitempty,tenant_selector"`
-	ruleFields
-}
+// RulePostRequestBody and RulePutRequestBody are the same shape: a rule has no
+// scope of its own; assignments bind it to (tenant, namespace) pairs.
+type RulePostRequestBody struct{ ruleFields }
 
-type RulePutRequestBody struct {
-	// Tenant is required on update so that scope changes are explicit.
-	Tenant string `json:"tenant" binding:"required,tenant_selector"`
-	ruleFields
-}
+type RulePutRequestBody struct{ ruleFields }
 
-func (b RulePostRequestBody) ToRule() (types.Rule, error) {
-	tenant := b.Tenant
-	if tenant == "" {
-		tenant = constants.DefaultTenant
-	}
-	return b.toRule(tenant)
-}
+func (b RulePostRequestBody) ToRule() (types.Rule, error) { return b.toRule() }
 
-func (b RulePutRequestBody) ToRule() (types.Rule, error) {
-	return b.toRule(b.Tenant)
-}
+func (b RulePutRequestBody) ToRule() (types.Rule, error) { return b.toRule() }
 
-func (f ruleFields) toRule(tenant string) (types.Rule, error) {
+func (f ruleFields) toRule() (types.Rule, error) {
 	var errs []types.FieldError
 	period, err := time.ParseDuration(f.Period)
 	if err != nil {
@@ -59,8 +43,6 @@ func (f ruleFields) toRule(tenant string) (types.Rule, error) {
 		return types.Rule{}, types.NewValidationError(errs...)
 	}
 	return types.Rule{
-		Tenant:      tenant,
-		Namespace:   f.Namespace,
 		Algorithm:   types.Algorithm(f.Algorithm),
 		Limit:       f.Limit,
 		Period:      period,
@@ -72,8 +54,6 @@ func (f ruleFields) toRule(tenant string) (types.Rule, error) {
 
 type RuleResponseBody struct {
 	ID          string    `json:"id"`
-	Tenant      string    `json:"tenant"`
-	Namespace   string    `json:"namespace"`
 	Algorithm   string    `json:"algorithm"`
 	Limit       int64     `json:"limit"`
 	Period      string    `json:"period"`
@@ -93,8 +73,6 @@ type RuleListResponseBody struct {
 func FromRule(r types.Rule) RuleResponseBody {
 	body := RuleResponseBody{
 		ID:        r.ID,
-		Tenant:    r.Tenant,
-		Namespace: r.Namespace,
 		Algorithm: string(r.Algorithm),
 		Limit:     r.Limit,
 		Period:    FormatDuration(r.Period),

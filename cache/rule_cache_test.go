@@ -2,8 +2,11 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,15 +18,32 @@ import (
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
-func rule(id, tenant string, version int64) types.Rule {
-	return types.Rule{ID: id, Tenant: tenant, Namespace: "orders", Algorithm: types.AlgorithmTokenBucket,
-		Limit: 10, Period: time.Second, Version: version}
+func rule(id string, version int64) types.Rule {
+	return types.Rule{ID: id, Algorithm: types.AlgorithmTokenBucket, Limit: 10, Period: time.Second, Version: version}
 }
 
-func startCache(t *testing.T, store *persistencetest.MemoryRuleStore, refresh time.Duration) *RuleCache {
+type fakeLookup struct {
+	calls atomic.Int64
+	delay time.Duration
+	res   types.Resolution
+	err   error
+}
+
+func (f *fakeLookup) Lookup(context.Context, string, string) (types.Resolution, string, error) {
+	f.calls.Add(1)
+	time.Sleep(f.delay)
+	return f.res, "postgres", f.err
+}
+
+func startCache(t *testing.T, store *persistencetest.MemoryBindings, fallback Lookup, refresh time.Duration) *RuleCache {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	c := New(store, store, refresh, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var lookup Lookup
+	if fallback != nil {
+		lookup = fallback
+	}
+	c := New(store, store, lookup, Options{Refresh: refresh, MissTTL: time.Minute}, metrics.New(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, c.Start(ctx))
 	t.Cleanup(func() {
 		cancel()
@@ -32,86 +52,142 @@ func startCache(t *testing.T, store *persistencetest.MemoryRuleStore, refresh ti
 	return c
 }
 
-func TestResolve_TenantRuleBeatsDefault(t *testing.T) {
-	store := persistencetest.NewMemoryRuleStore()
-	require.NoError(t, store.Create(context.Background(), rule("default", "*", 1)))
-	require.NoError(t, store.Create(context.Background(), rule("acme", "acme", 1)))
-	c := startCache(t, store, time.Hour)
+func TestResolve_TenantAssignmentBeatsDefault(t *testing.T) {
+	store := persistencetest.NewMemoryBindings()
+	store.AssignSilently("*", "orders", rule("default", 1))
+	store.AssignSilently("acme", "orders", rule("acme", 1))
+	c := startCache(t, store, nil, time.Hour)
+	ctx := context.Background()
 
-	r, match, ok := c.Resolve("acme", "orders")
+	r, match, ok := c.Resolve(ctx, "acme", "orders")
 	require.True(t, ok)
 	assert.Equal(t, "acme", r.ID)
 	assert.Equal(t, types.MatchTenant, match)
 
-	r, match, ok = c.Resolve("globex", "orders")
+	r, match, ok = c.Resolve(ctx, "globex", "orders")
 	require.True(t, ok)
 	assert.Equal(t, "default", r.ID)
 	assert.Equal(t, types.MatchDefault, match)
 
-	_, _, ok = c.Resolve("acme", "payments")
+	_, _, ok = c.Resolve(ctx, "acme", "payments")
 	assert.False(t, ok)
 	assert.True(t, c.Loaded())
 }
 
-func TestChangeEventsPropagate(t *testing.T) {
-	store := persistencetest.NewMemoryRuleStore()
-	c := startCache(t, store, time.Hour)
+func TestResolve_OneRuleServesManyPairs(t *testing.T) {
+	store := persistencetest.NewMemoryBindings()
+	shared := rule("pro", 1)
+	store.AssignSilently("acme", "orders", shared)
+	store.AssignSilently("globex", "search", shared)
+	c := startCache(t, store, nil, time.Hour)
+
+	a, _, _ := c.Resolve(context.Background(), "acme", "orders")
+	b, _, _ := c.Resolve(context.Background(), "globex", "search")
+	assert.Equal(t, "pro", a.ID)
+	assert.Equal(t, "pro", b.ID)
+	assert.Equal(t, 2, c.Len())
+}
+
+func TestChangeEventsTriggerReload(t *testing.T) {
+	store := persistencetest.NewMemoryBindings()
+	c := startCache(t, store, nil, time.Hour)
 	ctx := context.Background()
 
-	require.NoError(t, store.Create(ctx, rule("r1", "acme", 1)))
-	require.Eventually(t, func() bool { _, _, ok := c.Resolve("acme", "orders"); return ok }, time.Second, 5*time.Millisecond)
+	store.Assign("acme", "orders", rule("r1", 1))
+	require.Eventually(t, func() bool { _, _, ok := c.Resolve(ctx, "acme", "orders"); return ok }, time.Second, 5*time.Millisecond)
 
-	updated := rule("r1", "acme", 2)
+	updated := rule("r1", 2)
 	updated.Limit = 99
-	require.NoError(t, store.Update(ctx, updated, 1))
-	require.Eventually(t, func() bool { r, _, _ := c.Resolve("acme", "orders"); return r.Limit == 99 }, time.Second, 5*time.Millisecond)
+	store.Assign("acme", "orders", updated)
+	require.Eventually(t, func() bool { r, _, _ := c.Resolve(ctx, "acme", "orders"); return r.Limit == 99 }, time.Second, 5*time.Millisecond)
 
-	require.NoError(t, store.Delete(ctx, "r1"))
-	require.Eventually(t, func() bool { _, _, ok := c.Resolve("acme", "orders"); return !ok }, time.Second, 5*time.Millisecond)
-}
-
-func TestUpsertNeverMovesBackwards(t *testing.T) {
-	c := startCache(t, persistencetest.NewMemoryRuleStore(), time.Hour)
-	newer := rule("r1", "acme", 5)
-	newer.Limit = 50
-	c.Upsert(newer)
-	c.Upsert(rule("r1", "acme", 3))
-
-	r, _, _ := c.Resolve("acme", "orders")
-	assert.EqualValues(t, 5, r.Version)
-	assert.EqualValues(t, 50, r.Limit)
-}
-
-func TestReloadKeepsNewerLocalVersion(t *testing.T) {
-	store := persistencetest.NewMemoryRuleStore()
-	store.PutSilently(rule("r1", "acme", 1))
-	c := startCache(t, store, time.Hour)
-
-	// This instance already applied v2 locally; a reload that reads v1 (e.g.
-	// started before the write) must not regress it.
-	c.Upsert(rule("r1", "acme", 2))
-	require.NoError(t, c.Reload(context.Background()))
-	r, _, _ := c.Resolve("acme", "orders")
-	assert.EqualValues(t, 2, r.Version)
+	store.Unassign("acme", "orders")
+	require.Eventually(t, func() bool { _, _, ok := c.Resolve(ctx, "acme", "orders"); return !ok }, time.Second, 5*time.Millisecond)
 }
 
 func TestPeriodicReloadRecoversLostEvents(t *testing.T) {
-	store := persistencetest.NewMemoryRuleStore()
-	c := startCache(t, store, 50*time.Millisecond)
+	store := persistencetest.NewMemoryBindings()
+	c := startCache(t, store, nil, 50*time.Millisecond)
 
-	store.PutSilently(rule("r1", "acme", 1)) // no pub/sub message
-	require.Eventually(t, func() bool { _, _, ok := c.Resolve("acme", "orders"); return ok }, 2*time.Second, 10*time.Millisecond)
+	store.AssignSilently("acme", "orders", rule("r1", 1))
+	require.Eventually(t, func() bool { _, _, ok := c.Resolve(context.Background(), "acme", "orders"); return ok },
+		2*time.Second, 10*time.Millisecond)
 }
 
-func TestNewRuleForSamePairReplacesOld(t *testing.T) {
-	c := startCache(t, persistencetest.NewMemoryRuleStore(), time.Hour)
-	c.Upsert(rule("old", "acme", 1))
-	c.Upsert(rule("new", "acme", 1))
+func TestMiss_FallsBackAndReusesTheAnswer(t *testing.T) {
+	lookup := &fakeLookup{res: types.Resolution{Found: true, Match: types.MatchTenant, Rule: rule("late", 1)}}
+	c := startCache(t, persistencetest.NewMemoryBindings(), lookup, time.Hour)
 
-	r, _, _ := c.Resolve("acme", "orders")
-	assert.Equal(t, "new", r.ID)
-	assert.Equal(t, 1, c.Len())
-	c.Remove("old") // late delete for the replaced rule must not remove the new one
-	_, _, ok := c.Resolve("acme", "orders")
-	assert.True(t, ok)
+	for range 5 {
+		r, match, ok := c.Resolve(context.Background(), "acme", "orders")
+		require.True(t, ok, "a rule missing from the snapshot is found through the fallback")
+		assert.Equal(t, "late", r.ID)
+		assert.Equal(t, types.MatchTenant, match)
+	}
+	assert.EqualValues(t, 1, lookup.calls.Load())
+}
+
+func TestMiss_NoRuleIsCachedToo(t *testing.T) {
+	lookup := &fakeLookup{}
+	c := startCache(t, persistencetest.NewMemoryBindings(), lookup, time.Hour)
+
+	for range 100 {
+		_, _, ok := c.Resolve(context.Background(), "acme", "orders")
+		assert.False(t, ok)
+	}
+	assert.EqualValues(t, 1, lookup.calls.Load(), "unmatched traffic must not query the store on every request")
+}
+
+func TestMiss_ConcurrentCallersShareOneLookup(t *testing.T) {
+	lookup := &fakeLookup{delay: 20 * time.Millisecond}
+	c := startCache(t, persistencetest.NewMemoryBindings(), lookup, time.Hour)
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() { c.Resolve(context.Background(), "acme", "orders") })
+	}
+	wg.Wait()
+	assert.EqualValues(t, 1, lookup.calls.Load())
+}
+
+func TestMiss_FailureIsTreatedAsNoRuleAndCached(t *testing.T) {
+	lookup := &fakeLookup{err: errors.New("postgres down")}
+	c := startCache(t, persistencetest.NewMemoryBindings(), lookup, time.Hour)
+
+	for range 10 {
+		_, _, ok := c.Resolve(context.Background(), "acme", "orders")
+		assert.False(t, ok)
+	}
+	assert.EqualValues(t, 1, lookup.calls.Load(), "an outage costs one lookup per pair per TTL")
+}
+
+func TestMiss_SnapshotDefaultIsNotAMiss(t *testing.T) {
+	store := persistencetest.NewMemoryBindings()
+	store.AssignSilently("*", "orders", rule("default", 1))
+	lookup := &fakeLookup{}
+	c := startCache(t, store, lookup, time.Hour)
+
+	r, match, ok := c.Resolve(context.Background(), "acme", "orders")
+	require.True(t, ok)
+	assert.Equal(t, "default", r.ID)
+	assert.Equal(t, types.MatchDefault, match)
+	assert.Zero(t, lookup.calls.Load())
+}
+
+func TestMiss_ReloadDropsCachedAnswers(t *testing.T) {
+	store := persistencetest.NewMemoryBindings()
+	lookup := &fakeLookup{}
+	c := startCache(t, store, lookup, time.Hour)
+	ctx := context.Background()
+
+	_, _, ok := c.Resolve(ctx, "acme", "orders")
+	require.False(t, ok)
+
+	store.AssignSilently("acme", "orders", rule("r1", 1))
+	require.NoError(t, c.Reload(ctx))
+	_, _, ok = c.Resolve(ctx, "acme", "orders")
+	assert.True(t, ok, "the snapshot wins over a cached miss")
+
+	_, _, _ = c.Resolve(ctx, "globex", "orders")
+	assert.EqualValues(t, 2, lookup.calls.Load(), "misses are looked up again after a reload")
 }

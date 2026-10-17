@@ -95,8 +95,9 @@ func TestMultiInstance_ExactAdmissionUnderContention(t *testing.T) {
 	}
 }
 
-// TestMultiInstance_RuleChangePropagates updates a rule through one instance
-// and checks the other enforces it, via pub/sub (cache refresh is disabled).
+// TestMultiInstance_RuleChangePropagates changes rules and assignments through
+// one instance and checks the other enforces them, via pub/sub (periodic
+// refresh is disabled).
 func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 	a, b := twoInstances(t)
 	created := a.CreateRule(map[string]any{"tenant": "acme", "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 2})
@@ -105,7 +106,7 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 	require.Eventually(t, func() bool { return ruleVisible(t, b, "acme", "orders") }, 2*time.Second, 10*time.Millisecond)
 	assert.EqualValues(t, 2, b.Check("acme", "orders", 0)["limit"])
 
-	update := map[string]any{"tenant": "acme", "namespace": "orders", "algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 7}
+	update := map[string]any{"algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 7}
 	resp := a.Do(http.MethodPut, "/v1/rules/"+id, update, map[string]string{
 		"Authorization": "Bearer " + testutils.CallerToken, "If-Match": `"1"`,
 	})
@@ -115,10 +116,17 @@ func TestMultiInstance_RuleChangePropagates(t *testing.T) {
 		return b.Check("acme", "orders", 0)["limit"] == float64(7)
 	}, 2*time.Second, 10*time.Millisecond, "instance b enforces the new limit")
 
-	assert.Equal(t, http.StatusNoContent, b.Caller(http.MethodDelete, "/v1/rules/"+id, nil).Status)
+	other := b.CreateRule(map[string]any{"algorithm": "token_bucket", "limit": 1, "period": "1h", "burst": 11})["id"].(string)
+	b.Assign("acme", "orders", other)
+	require.Eventually(t, func() bool {
+		return a.Check("acme", "orders", 0)["rule_id"] == other
+	}, 2*time.Second, 10*time.Millisecond, "instance a follows a reassignment made on b")
+
+	assert.Equal(t, http.StatusNoContent, b.Caller(http.MethodDelete, "/v1/assignments/acme/orders", nil).Status)
 	require.Eventually(t, func() bool {
 		return a.Check("acme", "orders", 0)["reason"] == "no_rule"
-	}, 2*time.Second, 10*time.Millisecond, "instance a drops the deleted rule")
+	}, 2*time.Second, 10*time.Millisecond, "instance a drops the removed assignment")
+	assert.Equal(t, http.StatusNoContent, a.Caller(http.MethodDelete, "/v1/rules/"+id, nil).Status)
 }
 
 func ruleVisible(t *testing.T, app *testutils.TestApp, tenant, namespace string) bool {

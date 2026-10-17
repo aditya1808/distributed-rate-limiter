@@ -9,17 +9,16 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/aditya1808/distributed-rate-limiter/controllers"
-	"github.com/aditya1808/distributed-rate-limiter/manager"
 	ruleschema "github.com/aditya1808/distributed-rate-limiter/schemas/rule"
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
 type Manager interface {
-	Create(ctx context.Context, rule types.Rule) (types.Rule, error)
-	Update(ctx context.Context, id string, rule types.Rule, expectedVersion int64) (types.Rule, error)
-	Delete(ctx context.Context, id string) error
-	Get(ctx context.Context, id string) (types.Rule, error)
-	List(ctx context.Context, f manager.RuleFilter) ([]types.Rule, error)
+	CreateRule(ctx context.Context, rule types.Rule) (types.Rule, error)
+	UpdateRule(ctx context.Context, id string, rule types.Rule, expectedVersion int64) (types.Rule, error)
+	DeleteRule(ctx context.Context, id string) error
+	GetRule(ctx context.Context, id string) (types.Rule, error)
+	ListRules(ctx context.Context) ([]types.Rule, error)
 }
 
 type Controller struct {
@@ -39,7 +38,7 @@ func (ctl *Controller) Create(c *gin.Context) {
 		controllers.HandleError(c, err)
 		return
 	}
-	created, err := ctl.mgr.Create(c.Request.Context(), rule)
+	created, err := ctl.mgr.CreateRule(c.Request.Context(), rule)
 	if err != nil {
 		controllers.HandleError(c, err)
 		return
@@ -50,10 +49,7 @@ func (ctl *Controller) Create(c *gin.Context) {
 }
 
 func (ctl *Controller) List(c *gin.Context) {
-	rules, err := ctl.mgr.List(c.Request.Context(), manager.RuleFilter{
-		Tenant:    c.Query("tenant"),
-		Namespace: c.Query("namespace"),
-	})
+	rules, err := ctl.mgr.ListRules(c.Request.Context())
 	if err != nil {
 		controllers.HandleError(c, err)
 		return
@@ -62,7 +58,7 @@ func (ctl *Controller) List(c *gin.Context) {
 }
 
 func (ctl *Controller) Get(c *gin.Context) {
-	rule, err := ctl.mgr.Get(c.Request.Context(), c.Param("id"))
+	rule, err := ctl.mgr.GetRule(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		controllers.HandleError(c, err)
 		return
@@ -96,7 +92,7 @@ func (ctl *Controller) Update(c *gin.Context) {
 		controllers.HandleError(c, err)
 		return
 	}
-	updated, err := ctl.mgr.Update(c.Request.Context(), c.Param("id"), rule, expected)
+	updated, err := ctl.mgr.UpdateRule(c.Request.Context(), c.Param("id"), rule, expected)
 	if err != nil {
 		controllers.HandleError(c, err)
 		return
@@ -106,7 +102,7 @@ func (ctl *Controller) Update(c *gin.Context) {
 }
 
 func (ctl *Controller) Delete(c *gin.Context) {
-	if err := ctl.mgr.Delete(c.Request.Context(), c.Param("id")); err != nil {
+	if err := ctl.mgr.DeleteRule(c.Request.Context(), c.Param("id")); err != nil {
 		controllers.HandleError(c, err)
 		return
 	}

@@ -1,104 +1,73 @@
-// Package persistencetest provides in-memory stores for unit tests.
+// Package persistencetest provides in-memory stand-ins for unit tests.
 package persistencetest
 
 import (
 	"context"
-	"sort"
 	"sync"
 
+	"github.com/aditya1808/distributed-rate-limiter/constants"
 	"github.com/aditya1808/distributed-rate-limiter/persistence"
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
-type MemoryRuleStore struct {
+// MemoryBindings is an in-memory binding source and change bus for rule
+// cache tests.
+type MemoryBindings struct {
 	mu          sync.Mutex
-	rules       map[string]types.Rule
-	index       map[string]string
+	bindings    map[string]types.Binding
 	subscribers []chan persistence.ChangeEvent
 }
 
-var (
-	_ persistence.RuleStore        = (*MemoryRuleStore)(nil)
-	_ persistence.ChangeSubscriber = (*MemoryRuleStore)(nil)
-)
+var _ persistence.ChangeBus = (*MemoryBindings)(nil)
 
-func NewMemoryRuleStore() *MemoryRuleStore {
-	return &MemoryRuleStore{rules: map[string]types.Rule{}, index: map[string]string{}}
+func NewMemoryBindings() *MemoryBindings {
+	return &MemoryBindings{bindings: map[string]types.Binding{}}
 }
 
-func (s *MemoryRuleStore) Create(_ context.Context, rule types.Rule) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.index[rule.PairKey()]; exists {
-		return types.ErrConflict
-	}
-	s.index[rule.PairKey()] = rule.ID
-	s.rules[rule.ID] = rule
-	s.publish(persistence.ChangeEvent{Op: persistence.ChangeUpsert, ID: rule.ID, Version: rule.Version})
-	return nil
+// Assign binds a rule to a pair and broadcasts the change.
+func (s *MemoryBindings) Assign(tenant, namespace string, rule types.Rule) {
+	s.AssignSilently(tenant, namespace, rule)
+	_ = s.Publish(context.Background(), persistence.ChangeEvent{Kind: persistence.ChangeAssignment})
 }
 
-func (s *MemoryRuleStore) Update(_ context.Context, rule types.Rule, expectedVersion int64) error {
+// AssignSilently writes without broadcasting, simulating a lost pub/sub
+// message so tests can exercise the periodic reload and miss paths.
+func (s *MemoryBindings) AssignSilently(tenant, namespace string, rule types.Rule) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, ok := s.rules[rule.ID]
-	if !ok {
-		return types.ErrNotFound
-	}
-	if current.Version != expectedVersion {
-		return types.ErrVersionMismatch
-	}
-	s.rules[rule.ID] = rule
-	s.publish(persistence.ChangeEvent{Op: persistence.ChangeUpsert, ID: rule.ID, Version: rule.Version})
-	return nil
+	s.bindings[constants.PairKey(tenant, namespace)] = types.Binding{Tenant: tenant, Namespace: namespace, Rule: rule}
 }
 
-func (s *MemoryRuleStore) Delete(_ context.Context, id string) error {
+func (s *MemoryBindings) Unassign(tenant, namespace string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.rules[id]
-	if !ok {
-		return types.ErrNotFound
-	}
-	delete(s.rules, id)
-	if s.index[current.PairKey()] == id {
-		delete(s.index, current.PairKey())
-	}
-	s.publish(persistence.ChangeEvent{Op: persistence.ChangeDelete, ID: id})
-	return nil
+	delete(s.bindings, constants.PairKey(tenant, namespace))
+	s.mu.Unlock()
+	_ = s.Publish(context.Background(), persistence.ChangeEvent{Kind: persistence.ChangeAssignment})
 }
 
-func (s *MemoryRuleStore) Get(_ context.Context, id string) (types.Rule, error) {
+func (s *MemoryBindings) Bindings(context.Context) ([]types.Binding, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rule, ok := s.rules[id]
-	if !ok {
-		return types.Rule{}, types.ErrNotFound
+	out := make([]types.Binding, 0, len(s.bindings))
+	for _, b := range s.bindings {
+		out = append(out, b)
 	}
-	return rule, nil
-}
-
-func (s *MemoryRuleStore) List(_ context.Context) ([]types.Rule, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]types.Rule, 0, len(s.rules))
-	for _, r := range s.rules {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
-// PutSilently writes a rule without publishing, simulating a lost pub/sub
-// message so tests can exercise the periodic reload path.
-func (s *MemoryRuleStore) PutSilently(rule types.Rule) {
+func (s *MemoryBindings) Publish(_ context.Context, ev persistence.ChangeEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rules[rule.ID] = rule
-	s.index[rule.PairKey()] = rule.ID
+	for _, ch := range s.subscribers {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
+	return nil
 }
 
-func (s *MemoryRuleStore) Subscribe(ctx context.Context) (<-chan persistence.ChangeEvent, error) {
+func (s *MemoryBindings) Subscribe(ctx context.Context) (<-chan persistence.ChangeEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ch := make(chan persistence.ChangeEvent, 64)
@@ -116,13 +85,4 @@ func (s *MemoryRuleStore) Subscribe(ctx context.Context) (<-chan persistence.Cha
 		}
 	}()
 	return ch, nil
-}
-
-func (s *MemoryRuleStore) publish(ev persistence.ChangeEvent) {
-	for _, ch := range s.subscribers {
-		select {
-		case ch <- ev:
-		default:
-		}
-	}
 }

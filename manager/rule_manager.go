@@ -2,114 +2,142 @@ package manager
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/aditya1808/distributed-rate-limiter/constants"
 	"github.com/aditya1808/distributed-rate-limiter/persistence"
 	"github.com/aditya1808/distributed-rate-limiter/types"
 )
 
 type LocalRuleCache interface {
-	Upsert(rule types.Rule)
-	Remove(id string)
+	Reload(ctx context.Context) error
 }
 
-type RuleFilter struct {
-	Tenant    string
-	Namespace string
-}
-
-// RuleManager owns rule lifecycle. Writes go to the shared store (which
-// broadcasts them to every instance) and are applied to the local cache
-// immediately so this instance enforces them without waiting for pub/sub.
-// Reads go to the store, not the cache, so admins always read their writes.
+// RuleManager owns the lifecycle of rules and assignments. Writes commit to
+// Postgres, reload this instance's cache (so it enforces its own writes
+// immediately) and broadcast a change event so every other instance reloads.
+// Reads go to Postgres, not the cache, so admins always read their writes.
 type RuleManager struct {
-	store persistence.RuleStore
-	cache LocalRuleCache
-	now   func() time.Time
+	store       persistence.RuleStore
+	cache       LocalRuleCache
+	bus         persistence.ChangeBus
+	resolutions persistence.ResolutionCache
+	log         *slog.Logger
+	now         func() time.Time
 }
 
-func NewRuleManager(store persistence.RuleStore, cache LocalRuleCache) *RuleManager {
-	return &RuleManager{store: store, cache: cache, now: time.Now}
+func NewRuleManager(store persistence.RuleStore, cache LocalRuleCache, bus persistence.ChangeBus,
+	resolutions persistence.ResolutionCache, log *slog.Logger) *RuleManager {
+	return &RuleManager{store: store, cache: cache, bus: bus, resolutions: resolutions, log: log, now: time.Now}
 }
 
-func (m *RuleManager) Create(ctx context.Context, rule types.Rule) (types.Rule, error) {
+func (m *RuleManager) CreateRule(ctx context.Context, rule types.Rule) (types.Rule, error) {
 	if err := rule.Validate(); err != nil {
 		return types.Rule{}, err
 	}
-	now := m.now().UTC()
+	now := m.now().UTC().Truncate(time.Microsecond)
 	rule.ID = "r_" + strings.ToLower(ulid.Make().String())
 	rule.Version = 1
 	rule.CreatedAt = now
 	rule.UpdatedAt = now
-	if err := m.store.Create(ctx, rule); err != nil {
+	if err := m.store.CreateRule(ctx, rule); err != nil {
 		return types.Rule{}, err
 	}
-	m.cache.Upsert(rule)
+	// An unassigned rule affects no traffic, so there is nothing to broadcast.
 	return rule, nil
 }
 
-// Update replaces a rule if expectedVersion matches. Tenant and namespace
-// identify the rule's scope and are immutable.
-func (m *RuleManager) Update(ctx context.Context, id string, rule types.Rule, expectedVersion int64) (types.Rule, error) {
-	current, err := m.store.Get(ctx, id)
-	if err != nil {
+// UpdateRule replaces a rule if expectedVersion matches. Every pair assigned
+// to the rule starts fresh quota state under the new version.
+func (m *RuleManager) UpdateRule(ctx context.Context, id string, rule types.Rule, expectedVersion int64) (types.Rule, error) {
+	if err := rule.Validate(); err != nil {
 		return types.Rule{}, err
 	}
-	var immutable []types.FieldError
-	if rule.Tenant != current.Tenant {
-		immutable = append(immutable, types.FieldError{Field: "tenant", Message: "is immutable; delete and recreate the rule instead"})
-	}
-	if rule.Namespace != current.Namespace {
-		immutable = append(immutable, types.FieldError{Field: "namespace", Message: "is immutable; delete and recreate the rule instead"})
-	}
-	if len(immutable) > 0 {
-		return types.Rule{}, types.NewValidationError(immutable...)
+	current, err := m.store.GetRule(ctx, id)
+	if err != nil {
+		return types.Rule{}, err
 	}
 	if current.Version != expectedVersion {
 		return types.Rule{}, types.ErrVersionMismatch
 	}
-	if err := rule.Validate(); err != nil {
-		return types.Rule{}, err
-	}
-
 	rule.ID = id
 	rule.Version = expectedVersion + 1
 	rule.CreatedAt = current.CreatedAt
-	rule.UpdatedAt = m.now().UTC()
+	rule.UpdatedAt = m.now().UTC().Truncate(time.Microsecond)
 	// The store re-checks the version atomically; the check above only gives
 	// a fast, friendly failure.
-	if err := m.store.Update(ctx, rule, expectedVersion); err != nil {
+	if err := m.store.UpdateRule(ctx, rule, expectedVersion); err != nil {
 		return types.Rule{}, err
 	}
-	m.cache.Upsert(rule)
+	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeRule, ID: id})
 	return rule, nil
 }
 
-func (m *RuleManager) Delete(ctx context.Context, id string) error {
-	if err := m.store.Delete(ctx, id); err != nil {
+func (m *RuleManager) DeleteRule(ctx context.Context, id string) error {
+	return m.store.DeleteRule(ctx, id)
+}
+
+func (m *RuleManager) GetRule(ctx context.Context, id string) (types.Rule, error) {
+	return m.store.GetRule(ctx, id)
+}
+
+func (m *RuleManager) ListRules(ctx context.Context) ([]types.Rule, error) {
+	return m.store.ListRules(ctx)
+}
+
+// Assign binds a rule to a pair, replacing any existing assignment.
+func (m *RuleManager) Assign(ctx context.Context, a types.Assignment) (types.Assignment, bool, error) {
+	if err := a.Validate(); err != nil {
+		return types.Assignment{}, false, err
+	}
+	a.UpdatedAt = m.now().UTC().Truncate(time.Microsecond)
+	saved, created, err := m.store.PutAssignment(ctx, a)
+	if err != nil {
+		return types.Assignment{}, false, err
+	}
+	m.forget(ctx, a.Tenant, a.Namespace)
+	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: a.PairKey()})
+	return saved, created, nil
+}
+
+func (m *RuleManager) Unassign(ctx context.Context, tenant, namespace string) error {
+	if err := m.store.DeleteAssignment(ctx, tenant, namespace); err != nil {
 		return err
 	}
-	m.cache.Remove(id)
+	m.forget(ctx, tenant, namespace)
+	m.changed(ctx, persistence.ChangeEvent{Kind: persistence.ChangeAssignment, ID: constants.PairKey(tenant, namespace)})
 	return nil
 }
 
-func (m *RuleManager) Get(ctx context.Context, id string) (types.Rule, error) {
-	return m.store.Get(ctx, id)
+func (m *RuleManager) GetAssignment(ctx context.Context, tenant, namespace string) (types.Assignment, error) {
+	return m.store.GetAssignment(ctx, tenant, namespace)
 }
 
-func (m *RuleManager) List(ctx context.Context, f RuleFilter) ([]types.Rule, error) {
-	rules, err := m.store.List(ctx)
-	if err != nil {
-		return nil, err
+func (m *RuleManager) ListAssignments(ctx context.Context, f persistence.AssignmentFilter) ([]types.Assignment, error) {
+	return m.store.ListAssignments(ctx, f)
+}
+
+// changed runs after a committed write. Failures here are logged, not
+// returned: the write succeeded, and the periodic reload converges every
+// instance within RULE_REFRESH_INTERVAL.
+func (m *RuleManager) changed(ctx context.Context, ev persistence.ChangeEvent) {
+	ctx = context.WithoutCancel(ctx)
+	if err := m.cache.Reload(ctx); err != nil {
+		m.log.Warn("[RULE_MANAGER] local cache reload after write failed", "error", err)
 	}
-	out := rules[:0]
-	for _, r := range rules {
-		if (f.Tenant == "" || r.Tenant == f.Tenant) && (f.Namespace == "" || r.Namespace == f.Namespace) {
-			out = append(out, r)
-		}
+	if err := m.bus.Publish(ctx, ev); err != nil {
+		m.log.Warn("[RULE_MANAGER] change broadcast failed; instances converge on periodic reload", "error", err)
 	}
-	return out, nil
+}
+
+// forget drops the shared cached resolution for the pair itself. Tenants that
+// resolved through a "*" assignment expire with RULE_MISS_TTL.
+func (m *RuleManager) forget(ctx context.Context, tenant, namespace string) {
+	if err := m.resolutions.DeleteResolution(context.WithoutCancel(ctx), tenant, namespace); err != nil {
+		m.log.Warn("[RULE_MANAGER] dropping cached resolution failed", "error", err)
+	}
 }
